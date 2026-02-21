@@ -2,6 +2,7 @@ package com.localengine.cli;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
+import com.localengine.config.Constants;
 import com.localengine.document.DocumentTable;
 import com.localengine.gui.DesktopApp;
 import com.localengine.highlight.Snippet;
@@ -68,6 +69,42 @@ public class MainCommand implements Callable<Integer> {
         return 0;
     }
 
+    private int resolveThreadCount() {
+        if (threads <= 0) {
+            System.err.printf("⚠️ 非法线程数 %d，已回退为默认值 %d%n", threads, Constants.DEFAULT_INDEX_THREADS);
+            return Constants.DEFAULT_INDEX_THREADS;
+        }
+        if (threads > Constants.MAX_INDEX_THREADS) {
+            System.err.printf("⚠️ 线程数 %d 超过安全上限 %d，已自动限制%n", threads, Constants.MAX_INDEX_THREADS);
+            return Constants.MAX_INDEX_THREADS;
+        }
+        return threads;
+    }
+
+    private int sanitizeSearchLimit(int rawLimit) {
+        if (rawLimit < 0) {
+            System.err.printf("⚠️ limit=%d 非法，已使用 0%n", rawLimit);
+            return 0;
+        }
+        if (rawLimit > Constants.MAX_SEARCH_LIMIT) {
+            System.err.printf("⚠️ limit=%d 超过上限 %d，已自动限制%n", rawLimit, Constants.MAX_SEARCH_LIMIT);
+            return Constants.MAX_SEARCH_LIMIT;
+        }
+        return rawLimit;
+    }
+
+    private String sanitizeQuery(String rawQuery) {
+        if (rawQuery == null) {
+            return "";
+        }
+        String trimmed = rawQuery.trim();
+        if (trimmed.length() > Constants.MAX_QUERY_LENGTH) {
+            throw new CommandLine.ParameterException(new CommandLine(this),
+                "查询长度超过限制（最大 " + Constants.MAX_QUERY_LENGTH + " 字符）");
+        }
+        return trimmed;
+    }
+
     @Command(name = "index", description = "📂 构建或增量更新索引")
     static class IndexSubcommand implements Callable<Integer> {
 
@@ -82,9 +119,10 @@ public class MainCommand implements Callable<Integer> {
             System.out.println("🚀 开始索引...");
             System.out.println("📁 索引目录: " + main.indexDir);
             System.out.println("📂 源路径: " + sourcePaths);
-            System.out.println("🔧 线程数: " + main.threads);
+            int effectiveThreads = main.resolveThreadCount();
+            System.out.println("🔧 线程数: " + effectiveThreads);
 
-            try (IndexManager indexManager = new IndexManager(main.indexDir, main.threads)) {
+            try (IndexManager indexManager = new IndexManager(main.indexDir, effectiveThreads)) {
                 long start = System.currentTimeMillis();
                 indexManager.buildIndex(sourcePaths);
                 long elapsed = System.currentTimeMillis() - start;
@@ -121,12 +159,14 @@ public class MainCommand implements Callable<Integer> {
 
         @Override
         public Integer call() {
-            try (IndexManager indexManager = new IndexManager(main.indexDir, main.threads);
+            try (IndexManager indexManager = new IndexManager(main.indexDir, main.resolveThreadCount());
                  DocumentTable docTable = new DocumentTable(main.indexDir.resolve("documents.db"))) {
                 QueryEngine queryEngine = new QueryEngine(indexManager, docTable);
-                SearchResult result = queryEngine.search(query, limit);
+                String safeQuery = main.sanitizeQuery(query);
+                int safeLimit = main.sanitizeSearchLimit(limit);
+                SearchResult result = queryEngine.search(safeQuery, safeLimit);
 
-                System.out.println("🔍 查询: \"" + query + "\"");
+                System.out.println("🔍 查询: \"" + safeQuery + "\"");
                 System.out.println();
 
                 if ("json".equalsIgnoreCase(format)) {
@@ -177,7 +217,7 @@ public class MainCommand implements Callable<Integer> {
 
         @Override
         public Integer call() {
-            try (IndexManager indexManager = new IndexManager(main.indexDir, main.threads)) {
+            try (IndexManager indexManager = new IndexManager(main.indexDir, main.resolveThreadCount())) {
                 IndexStatus status = indexManager.getStatus();
 
                 System.out.println("📊 索引状态");
@@ -229,7 +269,7 @@ public class MainCommand implements Callable<Integer> {
             }
 
             System.out.println("🔄 开始重建索引...");
-            try (IndexManager indexManager = new IndexManager(main.indexDir, main.threads)) {
+            try (IndexManager indexManager = new IndexManager(main.indexDir, effectiveThreads)) {
                 long start = System.currentTimeMillis();
                 indexManager.rebuild(sourcePaths);
                 long elapsed = System.currentTimeMillis() - start;
