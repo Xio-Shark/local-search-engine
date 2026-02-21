@@ -49,6 +49,14 @@ public final class Constants {
     // ==================== 线程参数 ====================
     /** 默认索引工作线程数 */
     public static final int DEFAULT_INDEX_THREADS = Runtime.getRuntime().availableProcessors();
+    /** 最大索引线程数，防止过度并发导致系统资源耗尽 */
+    public static final int MAX_INDEX_THREADS = 64;
     /** 文件收集队列容量 */
     public static final int FILE_COLLECTOR_QUEUE_CAPACITY = 1000;
+
+    // ==================== 查询参数 ====================
+    /** 查询字符串最大长度，防止超长输入导致解析或执行耗时异常 */
+    public static final int MAX_QUERY_LENGTH = 2048;
+    /** 搜索返回结果最大上限，防止单次请求占用过多内存 */
+    public static final int MAX_SEARCH_LIMIT = 1000;
 }

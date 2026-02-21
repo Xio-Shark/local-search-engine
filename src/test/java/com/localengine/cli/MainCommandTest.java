@@ -147,6 +147,48 @@ class MainCommandTest {
         assertEquals(0, rebuildSubcommand.call());
     }
 
+
+    @Test
+    void testResolveThreadCountBoundary() throws Exception {
+        MainCommand command = new MainCommand();
+        setField(command, "threads", -1);
+        Method method = MainCommand.class.getDeclaredMethod("resolveThreadCount");
+        method.setAccessible(true);
+        int fallback = (int) method.invoke(command);
+        assertTrue(fallback > 0);
+
+        setField(command, "threads", 10_000);
+        int capped = (int) method.invoke(command);
+        assertEquals(64, capped);
+    }
+
+    @Test
+    void testSanitizeSearchLimitBoundary() throws Exception {
+        MainCommand command = new MainCommand();
+        Method method = MainCommand.class.getDeclaredMethod("sanitizeSearchLimit", int.class);
+        method.setAccessible(true);
+
+        assertEquals(0, method.invoke(command, -5));
+        assertEquals(1000, method.invoke(command, 5000));
+        assertEquals(20, method.invoke(command, 20));
+    }
+
+    @Test
+    void testSanitizeQueryRejectsTooLongInput() throws Exception {
+        MainCommand command = new MainCommand();
+        Method method = MainCommand.class.getDeclaredMethod("sanitizeQuery", String.class);
+        method.setAccessible(true);
+
+        String longQuery = "a".repeat(3000);
+        try {
+            method.invoke(command, longQuery);
+        } catch (Exception exception) {
+            assertTrue(exception.getCause() instanceof picocli.CommandLine.ParameterException);
+            return;
+        }
+        throw new AssertionError("expected ParameterException");
+    }
+
     private static void setField(Object target, String fieldName, Object value) throws Exception {
         Field field = target.getClass().getDeclaredField(fieldName);
         field.setAccessible(true);
