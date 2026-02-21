@@ -1,0 +1,54 @@
+# Gradle
+.gradle/
+build/
+gradle-app.setting
+!gradle-wrapper.jar
+!gradle-wrapper.properties
+
+# Java
+*.class
+*.jar
+*.war
+*.ear
+*.log
+*.db
+*.db-journal
+
+# IDE
+.idea/
+*.iml
+*.ipr
+*.iws
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Project specific
+index/
+logs/
+*.db
+*.wal
+*.wal.old
+segments/
+*.inv
+*.dict
+*.pos
+*.meta
+*.meta.json
+segments.gen
+
+# JMH
+jmh-result.json
+
+# Test output
+test-results/
+*_output.txt
+
+# Agent logs
+.waylog/
