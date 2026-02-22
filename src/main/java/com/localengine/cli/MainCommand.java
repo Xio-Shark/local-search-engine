@@ -268,8 +268,9 @@ public class MainCommand implements Callable<Integer> {
                 return 1;
             }
 
+            final int effectiveThreads = main.resolveThreadCount();
             System.out.println("🔄 开始重建索引...");
-            int effectiveThreads = main.resolveThreadCount();
+            System.out.println("🔧 线程数: " + effectiveThreads);
             try (IndexManager indexManager = new IndexManager(main.indexDir, effectiveThreads)) {
                 long start = System.currentTimeMillis();
                 indexManager.rebuild(sourcePaths);
