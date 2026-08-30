@@ -1,205 +1,123 @@
-# 高性能本地搜索引擎
+# lse — 本地全文本搜索引擎
 
-基于 Java 21 + Gradle 的高性能本地文件全文搜索引擎，不依赖 Lucene 等搜索框架。
+基于 [tantivy](https://github.com/quickwit-oss/tantivy)（Rust 全文索引引擎）的本地文件搜索引擎，
+专为 **career 知识库**（桌面目录 / 配合 RAG 系统）设计。
 
-## 功能特性
-
-- 🔍 **全文检索**：支持倒排索引 + 位置索引
-- 📊 **BM25 评分**：基于 BM25 算法的相关性排序
-- 📝 **自定义 Query DSL**：支持布尔、短语、前缀、字段过滤、范围查询
-- 🚀 **增量更新**：基于文件 mtime/size 的增量索引
-- 💾 **崩溃恢复**：WAL（预写日志）保证数据不丢失
-- 🔄 **段合并**：Tiered Merge 策略优化查询性能
-- 🎨 **CLI 交互**：支持 index/search/status/rebuild 四子命令
-
-## 技术栈
-
-- **Java 21 LTS**
-- **Gradle 8.6** (Kotlin DSL)
-- **SQLite**：文档元数据存储
-- **picocli**：命令行接口
-- **Jackson**：JSON 序列化
-- **Logback**：日志管理
-- **JMH**：性能基准测试
-- **JaCoCo**：代码覆盖率
+- 🔍 **中英文全文检索**：中文按 bigram 分词，英文按词切分
+- 📊 **BM25 相关性排序** + 命中高亮 snippet
+- 🚀 **增量更新**：基于 mtime/size 只索引变更文件
+- 🎨 **字段过滤**：`ext:` / `filename:` / `type:` / `path:` / `size:` / `mtime:`
+- 💻 **纯 CLI**，无 GUI，轻量（打包产物 ~29MB，含 tantivy 引擎）
+- 🪟 **跨平台**：macOS (arm64/x86_64) + Windows (amd64)，GitHub Actions 双矩阵自动打包
 
 ## 快速开始
 
-### 1. 构建项目
+```bash
+# 安装（Python 3.10+，uv 管理）
+uv install -e .
+
+# 1. 索引 career 目录（全部文本文件，自动跳过 .git/.venv/构建产物）
+lse index /Users/xioshark/Desktop/career
+
+# 2. 搜索（中文 bigram，毫秒级）
+lse search "本地搜索引擎检索知识库" --limit 10
+
+# 3. 字段过滤
+lse search 'ext:md'                    # 仅 Markdown
+lse search 'filename:README.md'        # 精确文件名
+lse search 'type:note'                 # 文档类型
+lse search '简历 美团'                  # 组合关键词
+
+# 4. 增量更新 / 状态 / 重建
+lse update /Users/xioshark/Desktop/career
+lse status
+lse rebuild --yes /Users/xioshark/Desktop/career
+```
+
+## 与 RAG 集成
+
+`rag-qa-bench` 通过 `lse_enabled` 配置启用 **BM25 预筛**：
 
 ```bash
-./gradlew build
+# rag 配置（.env 或 Settings）
+LSE_ENABLED=true
+LSE_INDEX_DIR=/Users/xioshark/Desktop/career/.lse-index
 ```
 
-### 1.1 启动图形界面（GUI）
+启用后：先用 lse 依据 query 找出相关**文档**，再从这些文档的 chunks 做向量检索，
+避免 SQLite 后端全量扫描所有 chunk 的 O(N) 开销。
+
+## 查询 DSL
+
+```
+本地搜索引擎检索知识库   # 中文短语（自动 bigram OR）
+"distributed system"     # 英文短语
+error AND (timeout OR retry)  # 布尔组合
+ext:md type:note         # 字段过滤
+filename:README.md       # 精确文件名
+mtime:2025-01-01..2025-12-31  # 日期范围
+sort:mtime 或 sort:size  # 按字段排序（tantivy 原生）
+```
+
+## 索引存储位置
+
+默认跨平台数据目录：
+
+| 平台 | 路径 |
+|------|------|
+| macOS | `~/Library/Application Support/lse/index/` |
+| Windows | `%LOCALAPPDATA%\lse\index\` |
+| Linux | `~/.local/share/lse/index/` |
+
+可用 `--index-dir` 或环境变量 `LSE_DATA_DIR` 覆盖。
+
+## 打包分发
 
 ```bash
-./gradlew run --args="--gui"
+# 本机（macOS/Windows 各自）
+pip install pyinstaller
+pyinstaller --clean --noconfirm packaging/lse.spec
+bash packaging/build_release.sh      # 产出 tar.gz / zip 到 release/
+
+# CI：推送 v* tag 触发双平台构建
+git tag v0.1.0 && git push origin v0.1.0
 ```
 
-### 2. 构建索引
+产物：
 
-```bash
-./gradlew run --args="index /path/to/documents"
-```
+- `dist/lse/` — 单目录可执行（直接分发）
+- `release/lse-macos-arm64-v0.1.0.tar.gz` — macOS 便携包
+- `release/lse-windows-amd64-v0.1.0.zip` — Windows 便携包（CI 产出）
 
-### 3. 搜索查询
+## 性能
 
-```bash
-# 简单查询
-./gradlew run --args='search "java programming"'
+在本仓库真实 career 数据（~15.8k 文本文件）上实测：
 
-# 短语查询
-./gradlew run --args='search "\"distributed system\""'
-
-# 布尔查询
-./gradlew run --args='search "error AND (timeout OR retry)"'
-
-# 字段过滤
-./gradlew run --args='search "ext:md type:code"'
-
-# 范围查询
-./gradlew run --args='search "mtime:2025-01-01..2025-12-31"'
-```
-
-### 4. 查看索引状态
-
-```bash
-./gradlew run --args="status"
-```
-
-### 5. 重建索引
-
-```bash
-./gradlew run --args="rebuild --yes /path/to/documents"
-```
-
-## 使用说明
-
-### 1) 启动方式
-
-- CLI：`./gradlew run --args="--help"`
-- GUI：`./gradlew run --args="--gui"`
-
-### 2) GUI 操作流程
-
-1. 顶部配置 `索引目录` 与 `线程数`。
-2. 在“索引”页签填入源路径（每行一个目录或文件），点击“构建/增量索引”。
-3. 在“搜索”页签输入查询语句并执行搜索。
-4. 可使用“文件名快速检索”直接按文件名搜索（自动转为 `filename:"xxx"`）。
-5. 在“状态”页签点击“刷新状态”查看文档数、词条数、段数与索引大小。
-
-### 3) 查询示例
-
-- 全文：`java programming`
-- 短语：`"distributed system"`
-- 布尔：`error AND (timeout OR retry)`
-- 扩展名：`ext:md`
-- 类型：`type:note`
-- 路径前缀：`path:C:/work/docs`
-- 文件名：`filename:PROJECT_SPEC.md`
-- 直接文件名：`PROJECT_SPEC.md`（会自动按文件名过滤）
-
-### 4) 结果高亮
-
-- CLI 中高亮由 ANSI 控制序列实现。
-- GUI 中高亮由富文本渲染实现（黄色背景），用于直观看到命中片段。
-
-## 分发与安装包（Windows EXE）
-
-### 1) 先决条件
-
-- Java 21（已包含 `jpackage`）。
-- `JAVA_HOME` 正确指向 JDK 目录。
-- 若要生成 `exe` 安装包，需安装 WiX Toolset（jpackage 在 Windows 生成 exe 的依赖）。
-
-### 2) 生成产物
-
-```bash
-# 生成可分发 app-image（不依赖 WiX）
-./gradlew packageAppImage
-
-# 生成可直接给用户下载的便携版 zip（推荐）
-./gradlew packagePortableZip
-
-# 生成 Windows EXE 安装包（依赖 WiX）
-./gradlew packageExe
-```
-
-产物路径：
-
-- app-image（推荐直接分发）：`build/distributions/appimage/LocalSearchEnginePortable/LocalSearchEnginePortable.exe`
-- 便携版 zip（推荐分发）：`build/distributions/LocalSearchEnginePortable-1.0.0.zip`
-- exe 安装包：`build/distributions/`（需 WiX 3.x）
-
-注意：`packageExe` 依赖 WiX 3.x（需要 `candle.exe`、`light.exe`）。若缺失该环境，可先分发 app-image 目录（将整个目录打包 zip 给用户）。
-
-### 3) 分发建议
-
-- 需要“开箱即用”安装体验：分发 `packageExe` 生成的 `.exe`。
-- 需要免安装绿色版：优先分发 `packagePortableZip` 生成的 zip。
-
-## Query DSL 语法
-
-```
-hello world                    # 隐式 AND
-"distributed system"           # 短语查询
-config*                        # 前缀匹配
-error AND (timeout OR retry)   # 布尔组合
--draft NOT internal            # 排除
-ext:md type:note               # 字段过滤
-filename:readme.md             # 按文件名过滤
-mtime:2025-01-01..2025-12-31   # 日期范围
-size:10KB..5MB                 # 大小范围
-path:/work/src                 # 路径前缀
-sort:mtime                     # 按修改时间排序
-```
-
-说明：当你直接输入类似 `readme.md` 这种带扩展名的单词项时，系统会自动按文件名过滤处理。
-
-## 性能指标
-
-- **JMH 基准测试**：内置 OpenJDK JMH 基准测试框架
-  - 索引吞吐：1,000 文件批量索引吞吐量（ops/s）
-  - 查询延迟：10,000 文件规模下的简单 / 短语 / 布尔查询平均延迟（ms）
-- **性能目标**：面向 10 万文件、5GB 文本量持续度量与优化
-- **崩溃恢复**：WAL 保证索引元数据一致性与可恢复到最近提交点
+| 指标 | 结果 |
+|------|------|
+| 全量索引（15,829 文件） | 6.4s（~115MB 索引） |
+| 中文查询延迟 | 1–31ms |
+| 查询吞吐 | 秒级返回百级匹配 |
+| 打包体积 | 29MB（压缩 12MB） |
 
 ## 项目结构
 
 ```
-local-search-engine/
-├── src/
-│   ├── main/java/com/localengine/
-│   │   ├── cli/          # CLI 层
-│   │   ├── config/       # 配置
-│   │   ├── document/     # 文档模型
-│   │   ├── highlight/    # 高亮摘要
-│   │   ├── index/        # 索引层
-│   │   ├── query/        # 查询引擎
-│   │   ├── scoring/      # 评分算法
-│   │   ├── storage/      # 存储层
-│   │   └── text/         # 分词器
-│   ├── test/             # 测试
-│   └── jmh/              # JMH 基准测试
-├── docs/                 # 设计文档
-├── build.gradle.kts      # Gradle 配置
-└── README.md            # 本文件
+lse/
+├── config.py      # 配置常量（文件类型、排除规则、内存限制）
+├── discovery.py   # 目录递归 + 文本文件识别
+├── schema.py      # tantivy schema + tokenizer
+├── indexer.py     # 全量/增量/重建索引
+├── searcher.py    # BM25 查询 + CJK 扩展 + 高亮
+├── model.py       # 领域模型
+├── store.py       # 索引目录管理
+├── cli.py         # CLI 入口
+├── tests/         # pytest 单元测试
+└── packaging/     # PyInstaller spec + 打包脚本 + CI
 ```
 
 ## 测试
 
 ```bash
-# 运行单元测试
-./gradlew test
-
-# 生成覆盖率报告
-./gradlew jacocoTestReport
-
-# 运行 JMH 基准测试
-./gradlew jmh
+uv run pytest            # 15 例单元测试
 ```
-
-## 许可证
-
-MIT License
