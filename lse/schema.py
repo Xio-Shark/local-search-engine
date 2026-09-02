@@ -16,38 +16,46 @@ from datetime import datetime
 
 import tantivy
 
-TOKENIZER_CJK = "lse_cjk_bigram"
+TOKENIZER_CJK = "lse_cjk"
 TOKENIZER_RAW = "lse_raw"
+TOKENIZER_RAW_LOWER = "lse_raw_lower"
 
 
 def build_schema() -> tantivy.Schema:
     """构建 schema。
 
-    - content 使用 ngram(2,2) 支持中文 bigram
-    - 元数据字段（path/filename/extension/doc_type）用 raw 分词，
-      整值精确匹配，支持 ext:md / filename:note2.md 等字段过滤
-    - 注意：text 字段不要同时 fast=True，否则 fast 字段会用
-      with_tokenizer 要求注册 fast field tokenizer，导致 writer 报错。
+    - content 使用 ngram(1,2) + lowercase，支持单字、双字及英文大小写不敏感检索
+    - filename / extension / doc_type 用 raw + lowercase 分词，整值不区分大小写匹配
+    - path 保持 raw 原生大小写，供 delete_documents_by_term 精确操作
+    - size / mtime 开启 fast=True 与 indexed=True，支持范围过滤与快速排序
     """
     builder = tantivy.SchemaBuilder()
     builder.add_text_field("path", stored=True, tokenizer_name=TOKENIZER_RAW)
-    builder.add_text_field("filename", stored=True, tokenizer_name=TOKENIZER_RAW)
-    builder.add_text_field("extension", stored=True, tokenizer_name=TOKENIZER_RAW)
+    builder.add_text_field("filename", stored=True, tokenizer_name=TOKENIZER_RAW_LOWER)
+    builder.add_text_field("extension", stored=True, tokenizer_name=TOKENIZER_RAW_LOWER)
     builder.add_text_field("content", stored=True, tokenizer_name=TOKENIZER_CJK)
-    builder.add_integer_field("size", stored=True, fast=True)
-    builder.add_date_field("mtime", stored=True, fast=True)
-    builder.add_text_field("doc_type", stored=True, tokenizer_name=TOKENIZER_RAW)
+    builder.add_integer_field("size", stored=True, fast=True, indexed=True)
+    builder.add_date_field("mtime", stored=True, fast=True, indexed=True)
+    builder.add_text_field("doc_type", stored=True, tokenizer_name=TOKENIZER_RAW_LOWER)
     return builder.build()
 
 
 def register_tokenizers(index: tantivy.Index) -> None:
     """在索引上注册自定义 tokenizer（必须在写入文档前调用）。"""
-    cjk_analyzer = tantivy.TextAnalyzerBuilder(
-        tantivy.Tokenizer.ngram(2, 2, prefix_only=False)
-    ).build()
+    cjk_analyzer = (
+        tantivy.TextAnalyzerBuilder(tantivy.Tokenizer.ngram(1, 2, prefix_only=False))
+        .filter(tantivy.Filter.lowercase())
+        .build()
+    )
     index.register_tokenizer(TOKENIZER_CJK, cjk_analyzer)
     raw_analyzer = tantivy.TextAnalyzerBuilder(tantivy.Tokenizer.raw()).build()
     index.register_tokenizer(TOKENIZER_RAW, raw_analyzer)
+    raw_lower_analyzer = (
+        tantivy.TextAnalyzerBuilder(tantivy.Tokenizer.raw())
+        .filter(tantivy.Filter.lowercase())
+        .build()
+    )
+    index.register_tokenizer(TOKENIZER_RAW_LOWER, raw_lower_analyzer)
 
 
 def to_epoch_mtime(mtime: float) -> datetime:
