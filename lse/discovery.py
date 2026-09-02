@@ -26,11 +26,13 @@ def _skip_path(path: Path) -> bool:
     return any(fragment in path_str for fragment in SKIP_PATH_FRAGMENTS)
 
 
-def is_text_file(path: Path) -> bool:
+def is_text_file(path: Path, extra_exclude: set[str] | None = None) -> bool:
     """判断文件是否应进入索引（后缀白名单 + 大小 + 名字排除 + 路径片段排除）。"""
     if _skip_path(path):
         return False
     if path.name in SKIP_FILENAMES:
+        return False
+    if extra_exclude and (path.name in extra_exclude or any(ex in path.parts for ex in extra_exclude)):
         return False
     suffix = path.suffix.lower()
     if suffix not in TEXT_SUFFIXES or suffix in SKIP_SUFFIXES:
@@ -43,15 +45,20 @@ def is_text_file(path: Path) -> bool:
     return True
 
 
-def _should_skip_dir(name: str) -> bool:
-    return name in SKIP_DIR_NAMES
+def _should_skip_dir(name: str, extra_exclude: set[str] | None = None) -> bool:
+    if name in SKIP_DIR_NAMES:
+        return True
+    if extra_exclude and name in extra_exclude:
+        return True
+    return False
 
 
-def discover_files(root: Path) -> list[IndexableFile]:
-    """递归扫描 root，返回文本文件列表（跳过 SKIP_DIR_NAMES 中的目录）。
+def discover_files(root: Path, extra_exclude: list[str] | set[str] | None = None) -> list[IndexableFile]:
+    """递归扫描 root，返回文本文件列表（跳过 SKIP_DIR_NAMES 中的目录及 extra_exclude）。
 
     对 symlink 目录不跟随，避免循环；文件按 mtime 排序保证稳定顺序。
     """
+    exclude_set = set(extra_exclude) if extra_exclude else None
     results: list[IndexableFile] = []
 
     def walk(directory: Path) -> None:
@@ -62,12 +69,12 @@ def discover_files(root: Path) -> list[IndexableFile]:
         except OSError:
             return
         for entry in entries:
-            if _should_skip_dir(entry.name):
+            if _should_skip_dir(entry.name, exclude_set):
                 continue
             try:
                 if entry.is_dir(follow_symlinks=False):
                     walk(Path(entry.path))
-                elif entry.is_file(follow_symlinks=False) and is_text_file(Path(entry.path)):
+                elif entry.is_file(follow_symlinks=False) and is_text_file(Path(entry.path), exclude_set):
                     entry_stat = entry.stat()
                     results.append(
                         IndexableFile(

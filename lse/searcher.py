@@ -1,7 +1,7 @@
 """搜索引擎：BM25 查询 + 高亮 + 字段过滤。
 
-查询输入直接交给 tantivy parse_query；对形如 `ext:md filename:foo` 的
-字段过滤，tantivy 原生支持 `field:value` 语法。返回自定义 SearchHit 列表。
+查询输入交由 tantivy parse_query，结合 CJK 扩展、字段别名翻译、
+数值/日期范围查询转换与 fast-field 原生排序。返回自定义 SearchHit 列表。
 """
 
 from __future__ import annotations
@@ -23,7 +23,7 @@ from .indexer import IndexEngine
 from .model import SearchHit, SearchResult
 from .schema import register_tokenizers
 
-# 匹配 field:value 前缀（如 ext:md、filename:readme.md、mtime:2025-01-01..2025-12-31）
+# 匹配 field: 前缀（如 ext:md、filename:readme.md）
 _FIELD_PREFIX_RE = re.compile(r"([a-zA-Z_]+):")
 
 
@@ -60,12 +60,31 @@ class SearchEngine:
         self.index.reload()
         searcher = self.index.searcher()
 
-        translated = self._translate_query(query)
-        expanded = self._expand_cjk_query(translated)
-        parsed = self.index.parse_query(expanded, DEFAULT_SEARCH_FIELDS)
-        hits = searcher.search(parsed, min(limit, 1000))
+        # 1. 抽取 sort: 排序指令（如 sort:mtime, sort:size:asc）
+        cleaned_query, sort_field, sort_order = self._extract_sort(query)
 
-        results = self._to_hits(searcher, hits, query)
+        # 2. 翻译别名与范围语法 (size:.. / mtime:..)
+        translated = self._translate_query(cleaned_query)
+
+        # 3. 对中文长词合理扩展（带括号与原短语加权，不污染布尔与字段过滤）
+        expanded = self._expand_cjk_query(translated)
+
+        # 4. 若去除排序指令后 query 为空，默认检索全部文档
+        effective_query = expanded.strip() or "*"
+        parsed = self.index.parse_query(
+            effective_query,
+            DEFAULT_SEARCH_FIELDS,
+            conjunction_by_default=True,
+        )
+
+        # 5. 执行搜索（带排序或原生 BM25 相关性打分）
+        limit_val = min(max(limit, 1), 1000)
+        if sort_field:
+            hits = searcher.search(parsed, limit_val, order_by_field=sort_field, order=sort_order)
+        else:
+            hits = searcher.search(parsed, limit_val)
+
+        results = self._to_hits(searcher, hits, cleaned_query)
         elapsed_ms = int((datetime.now() - start).total_seconds() * 1000)
         return SearchResult(
             query=query,
@@ -74,38 +93,104 @@ class SearchEngine:
             elapsed_ms=elapsed_ms,
         )
 
-    def _expand_cjk_query(self, query: str) -> str:
-        """把查询中的连续 CJK 段切成 2-gram 并用 OR 连接。
+    def _extract_sort(self, query: str) -> tuple[str, str | None, tantivy.Order]:
+        """提取并在查询串中剥离 sort:field 指令。"""
+        sort_match = re.search(r"\bsort:([a-zA-Z_]+)(?::(asc|desc))?\b", query, flags=re.IGNORECASE)
+        sort_field = None
+        sort_order = tantivy.Order.Desc
+        if sort_match:
+            field_name = sort_match.group(1).lower()
+            direction = (sort_match.group(2) or "desc").lower()
+            if field_name in ("mtime", "size"):
+                sort_field = field_name
+                sort_order = tantivy.Order.Asc if direction == "asc" else tantivy.Order.Desc
+            query = query[:sort_match.start()] + " " + query[sort_match.end():]
+            query = query.strip()
+        return query, sort_field, sort_order
 
-        索引侧 content 用 ngram(2,2)，查询词若按整串隐式 AND 会导致
-        长中文查询必为 0 命中；这里拆成 OR 让 BM25 打分排序即可。
-        字段前缀（filename:/ext: 等）与英文原样保留。
+    def _expand_cjk_query(self, query: str) -> str:
+        """对普通查询项中连续 >=4 字的 CJK 词进行扩展，同时保留短语高权重与双字召回。
+
+        被引号包裹的短语、字段过滤表达式（如 ext:md、path:...）保持原样不变。
+        扩展结果强制使用括号包裹，确保在 conjunction_by_default 下与其他条件保持 AND 语义。
         """
         if not query:
             return query
 
-        def expand(match: re.Match[str]) -> str:
-            segment = match.group(0)
-            if len(segment) < 4:
-                return segment
-            grams = [segment[i : i + 2] for i in range(len(segment) - 1)]
-            return " OR ".join(grams)
+        pattern = re.compile(
+            r'("[^"]*")|'                                  # Group 1: quoted string
+            r'([a-zA-Z_]+:(?:\[[^\]]*\]|"[^"]*"|\S+))|'  # Group 2: field filter
+            r'(\S+)'                                       # Group 3: plain term
+        )
 
-        # 匹配连续 CJK（含中文标点隔离），不含字段前缀部分
-        cjk_segment_re = re.compile(r"[\u4e00-\u9fff]{4,}")
-        return cjk_segment_re.sub(expand, query)
+        out = []
+        for m in pattern.finditer(query):
+            quoted, field_filter, term = m.groups()
+            if quoted:
+                out.append(quoted)
+            elif field_filter:
+                out.append(field_filter)
+            elif term:
+                # 连续 CJK 汉字 >= 4 个字符且未包含操作符
+                if re.fullmatch(r"[\u4e00-\u9fff]{4,}", term):
+                    grams = [term[i : i + 2] for i in range(len(term) - 1)]
+                    expanded = f'("{term}"^5 OR {" OR ".join(grams)})'
+                    out.append(expanded)
+                else:
+                    out.append(term)
+
+        return " ".join(out)
 
     def _translate_query(self, query: str) -> str:
-        """把 `ext:md type:note` 等别名翻译为 schema 字段名。"""
-
-        def replace(match: re.Match[str]) -> str:
+        """翻译别名及范围语法。"""
+        # 1. 字段别名翻译（ext->extension 等）
+        def replace_alias(match: re.Match[str]) -> str:
             field = match.group(1)
             target = self._FIELD_ALIASES.get(field.lower())
             if target and target != field.lower():
                 return target + ":"
             return match.group(0)
 
-        return _FIELD_PREFIX_RE.sub(replace, query)
+        query = _FIELD_PREFIX_RE.sub(replace_alias, query)
+
+        # 2. size 范围翻译（支持 10KB..5MB 或 100..5000）
+        def parse_bytes(val: str) -> int:
+            val = val.strip().upper()
+            if val.endswith("KB"):
+                return int(float(val[:-2]) * 1024)
+            elif val.endswith("MB"):
+                return int(float(val[:-2]) * 1024 * 1024)
+            elif val.endswith("GB"):
+                return int(float(val[:-2]) * 1024 * 1024 * 1024)
+            elif val.endswith("B"):
+                return int(val[:-1])
+            return int(val)
+
+        def replace_size_range(m):
+            start = parse_bytes(m.group(1)) if m.group(1) else "*"
+            end = parse_bytes(m.group(2)) if m.group(2) else "*"
+            return f"size:[{start} TO {end}]"
+
+        query = re.sub(
+            r"\bsize:(\d+(?:\.\d+)?(?:[KMGT]?B)?)\.\.(\d+(?:\.\d+)?(?:[KMGT]?B)?)\b",
+            replace_size_range,
+            query,
+            flags=re.IGNORECASE,
+        )
+
+        # 3. mtime 日期范围翻译 (mtime:2025-01-01..2025-12-31)
+        def replace_date_range(m):
+            start = f"{m.group(1)}T00:00:00Z" if m.group(1) else "*"
+            end = f"{m.group(2)}T23:59:59Z" if m.group(2) else "*"
+            return f"mtime:[{start} TO {end}]"
+
+        query = re.sub(
+            r"\bmtime:(\d{4}-\d{2}-\d{2})\.\.(\d{4}-\d{2}-\d{2})\b",
+            replace_date_range,
+            query,
+        )
+
+        return query
 
     def _to_hits(self, searcher, search_result, query: str) -> list[SearchHit]:
         hits: list[SearchHit] = []
@@ -118,6 +203,10 @@ class SearchEngine:
                 continue
             path_str = str(path)
             mtime = _parse_mtime(doc.get_first("mtime"))
+            try:
+                score_val = float(score)
+            except (TypeError, ValueError):
+                score_val = 0.0
             hits.append(
                 SearchHit(
                     path=path_str,
@@ -126,61 +215,88 @@ class SearchEngine:
                     doc_type=doc.get_first("doc_type") or "",
                     size=doc.get_first("size") or 0,
                     mtime=mtime,
-                    score=score,
+                    score=score_val,
                     snippets=self._snippets(content, query),
                 )
             )
         return hits
 
     def _snippets(self, content: str, query: str) -> list[str]:
-        """从内容提取含查询词片段（简单窗口截取），cli 端负责高亮显示。"""
+        """从内容提取含查询词片段（多窗口截取，合并重叠区域）。"""
         if not content:
             return []
         terms = _query_terms(query)
         if not terms:
-            return [content[: SNIPPET_CONTEXT_CHARS * 2]]
+            first_chunk = content[: SNIPPET_CONTEXT_CHARS * 2].replace("\n", " ").strip()
+            return [first_chunk + ("…" if len(content) > len(first_chunk) else "")]
+
         lowered = content.lower()
         hits_positions: list[int] = []
         for term in terms:
+            if not term:
+                continue
             start = 0
             while True:
-                idx = lowered.find(term, start)
+                idx = lowered.find(term.lower(), start)
                 if idx == -1:
                     break
                 hits_positions.append(idx)
-                start = idx + len(term)
+                start = idx + max(len(term), 1)
+
         if not hits_positions:
-            return [content[: SNIPPET_CONTEXT_CHARS * 2]]
-        # 取第一个命中位置的前后窗口
-        center = min(hits_positions)
-        start = max(0, center - SNIPPET_CONTEXT_CHARS)
-        end = min(len(content), center + SNIPPET_CONTEXT_CHARS)
-        snippet = content[start:end].replace("\n", " ").strip()
-        if start > 0:
-            snippet = "…" + snippet
-        if end < len(content):
-            snippet = snippet + "…"
-        return [snippet]
+            first_chunk = content[: SNIPPET_CONTEXT_CHARS * 2].replace("\n", " ").strip()
+            return [first_chunk + ("…" if len(content) > len(first_chunk) else "")]
+
+        hits_positions.sort()
+        windows: list[tuple[int, int]] = []
+        for pos in hits_positions:
+            w_start = max(0, pos - SNIPPET_CONTEXT_CHARS)
+            w_end = min(len(content), pos + SNIPPET_CONTEXT_CHARS)
+            if windows and w_start <= windows[-1][1]:
+                windows[-1] = (windows[-1][0], max(windows[-1][1], w_end))
+            else:
+                windows.append((w_start, w_end))
+            if len(windows) >= SNIPPET_MAX_COUNT:
+                break
+
+        snippets: list[str] = []
+        for w_start, w_end in windows[:SNIPPET_MAX_COUNT]:
+            snippet_str = content[w_start:w_end].replace("\n", " ").strip()
+            prefix = "…" if w_start > 0 else ""
+            suffix = "…" if w_end < len(content) else ""
+            snippets.append(f"{prefix}{snippet_str}{suffix}")
+
+        return snippets
 
 
 def _query_terms(query: str) -> list[str]:
-    """从查询提取用于高亮的词（简单切分：字母数字段与 CJK 段）。"""
+    """从查询提取用于高亮和定位的搜索词，过滤字段前缀与操作符。"""
     if not query:
         return []
-    parts = re.findall(r"[A-Za-z0-9_]+|[\u4e00-\u9fff]+", query.lower())
+    # 过滤字段过滤表达式
+    cleaned = re.sub(r"[a-zA-Z_]+:(?:\[[^\]]*\]|\"[^\"]*\"|\S+)", " ", query)
+    # 过滤布尔操作符与括号符号
+    cleaned = re.sub(r"\b(AND|OR|NOT)\b|[()\"^0-9]+", " ", cleaned)
+    parts = re.findall(r"[A-Za-z0-9_]+|[\u4e00-\u9fff]+", cleaned.lower())
     terms: list[str] = []
     for part in parts:
+        part = part.strip()
+        if not part:
+            continue
         if re.match(r"^[a-z0-9_]+$", part):
             terms.append(part)
         else:
-            # CJK：按 2-gram 切（与索引 tokenizer 对齐）
-            if len(part) == 1:
-                terms.append(part)
-            elif len(part) == 2:
-                terms.append(part)
-            else:
+            terms.append(part)
+            if len(part) > 2:
                 terms.extend(part[i : i + 2] for i in range(len(part) - 1))
-    return terms
+
+    seen: set[str] = set()
+    unique: list[str] = []
+    for t in terms:
+        if t not in seen:
+            seen.add(t)
+            unique.append(t)
+    return unique
 
 
 def _parse_mtime(value) -> datetime:
@@ -189,6 +305,10 @@ def _parse_mtime(value) -> datetime:
     if isinstance(value, datetime):
         return value
     try:
-        return datetime.fromtimestamp(float(value))
-    except (TypeError, ValueError):
+        # Tantivy date fast field returns nanoseconds since epoch
+        val_float = float(value)
+        if val_float > 1e14:  # nanoseconds
+            val_float = val_float / 1e9
+        return datetime.fromtimestamp(val_float)
+    except (TypeError, ValueError, OSError):
         return datetime.min

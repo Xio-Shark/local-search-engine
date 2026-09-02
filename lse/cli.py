@@ -62,6 +62,7 @@ def _build_parser() -> argparse.ArgumentParser:
     rebuild_p = sub.add_parser("rebuild", help="全量重建索引")
     rebuild_p.add_argument("paths", nargs="+", type=Path, help="要索引的目录或文件")
     rebuild_p.add_argument("--yes", action="store_true", help="确认删除现有索引")
+    _add_common_index_args(rebuild_p)
     rebuild_p.set_defaults(func=_cmd_rebuild)
 
     return parser
@@ -73,9 +74,9 @@ def _add_common_index_args(parser: argparse.ArgumentParser) -> None:
 
 def _cmd_index(args) -> int:
     engine = IndexEngine(args.index_dir)
-    count = _collect_count(engine, args.paths)
+    count = _collect_count(engine, args.paths, getattr(args, "exclude", None))
     print(f"🚀 开始全量索引: {count} 个文件 → {args.index_dir}")
-    status = engine.build(args.paths)
+    status = engine.build(args.paths, extra_exclude=getattr(args, "exclude", None))
     _print_status(status)
     return 0
 
@@ -87,7 +88,7 @@ def _cmd_update(args) -> int:
         print("⚠️ 未提供路径且无上次索引记录，请指定目录")
         return 1
     print(f"🔄 增量更新: {roots}")
-    status = engine.update(roots)
+    status = engine.update(roots, extra_exclude=getattr(args, "exclude", None))
     _print_status(status)
     return 0
 
@@ -119,21 +120,22 @@ def _cmd_rebuild(args) -> int:
         return 1
     engine = IndexEngine(args.index_dir)
     print(f"🔄 重建索引: {args.paths}")
-    status = engine.rebuild(args.paths)
+    status = engine.rebuild(args.paths, extra_exclude=getattr(args, "exclude", None))
     _print_status(status)
     return 0
 
 
-def _collect_count(engine: IndexEngine, paths: list[Path]) -> int:
+def _collect_count(engine: IndexEngine, paths: list[Path], extra_exclude: list[str] | None = None) -> int:
     from .discovery import discover_files, is_text_file
 
     count = 0
+    exclude_set = set(extra_exclude) if extra_exclude else None
     for path in paths:
         path = Path(path)
         if path.is_file():
-            count += 1 if is_text_file(path) else 0
+            count += 1 if is_text_file(path, exclude_set) else 0
         elif path.is_dir():
-            count += len(discover_files(path))
+            count += len(discover_files(path, extra_exclude))
     return count
 
 
@@ -144,7 +146,15 @@ def _last_indexed_roots(index_dir: Path) -> list[Path]:
     if not meta.exists():
         return []
     try:
-        return [Path(p) for p in json.loads(meta.read_text()).get("files", [])[:0]]
+        data = json.loads(meta.read_text())
+        roots = data.get("roots", [])
+        if roots:
+            return [Path(p) for p in roots]
+        files = data.get("files", [])
+        if files:
+            # Fallback for legacy state format
+            return list({Path(f["path"]).parent for f in files if isinstance(f, dict) and "path" in f})
+        return []
     except (ValueError, OSError):
         return []
 
@@ -158,6 +168,18 @@ def _print_status(status) -> None:
         print(f"   最后更新: {status.last_updated.isoformat()}")
 
 
+def _highlight_snippet(snippet: str, query: str) -> str:
+    import re
+    from .searcher import _query_terms
+
+    terms = _query_terms(query)
+    if not terms:
+        return snippet
+    sorted_terms = sorted(set(terms), key=len, reverse=True)
+    pattern = re.compile("(" + "|".join(re.escape(t) for t in sorted_terms if t) + ")", re.IGNORECASE)
+    return pattern.sub(r"\033[1;33m\1\033[0m", snippet)
+
+
 def _print_text_result(result: SearchResult) -> None:
     print(f"🔍 查询: \"{result.query}\"")
     print()
@@ -166,10 +188,10 @@ def _print_text_result(result: SearchResult) -> None:
         print(f"\n📊 共 0 条匹配，用时 {result.elapsed_ms}ms")
         return
     for i, hit in enumerate(result.hits, 1):
-        print(f"─────────────────────────────────")
+        print("─────────────────────────────────")
         print(f"{i}. {hit.path} (score: {hit.score:.4f})")
         for snippet in hit.snippets:
-            print(f"   {snippet}")
+            print(f"   {_highlight_snippet(snippet, result.query)}")
         print()
     print(f"📊 共 {result.total_matches} 条匹配，用时 {result.elapsed_ms}ms")
 
