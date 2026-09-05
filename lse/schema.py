@@ -4,9 +4,9 @@
 - path      完整路径（stored + fast，raw 精确匹配，供命中回显）
 - filename  文件名（stored，raw 精确匹配，支持 filename: 快速定位）
 - extension 后缀（stored + fast，raw 匹配，扩展名过滤）
-- content   全文内容（stored + indexed，ngram(2,2) 分词，支持中文 bigram）
-- size      字节大小（stored + fast，可排序）
-- mtime     修改时间（stored + fast，datetime 存储，可排序）
+- content   全文内容（stored + indexed，多粒度分词倒排存储）
+- size      字节大小（stored + fast，可排序与范围过滤）
+- mtime     修改时间（stored + fast，datetime 存储，可排序与范围过滤）
 - doc_type  类型标签（stored + fast）
 """
 

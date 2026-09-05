@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import time
 from pathlib import Path
-from lse.indexer import IndexEngine
+from lse.indexer import IndexEngine, _compute_content_hash
 from lse.searcher import SearchEngine
 
 
@@ -117,3 +117,32 @@ def test_corrupted_file_handling(tmp_path: Path):
 
     searcher = SearchEngine(idx_dir)
     assert searcher.search("正常").total_matches == 1
+
+
+def test_content_hash_and_atomic_state(tmp_path: Path):
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    idx_dir = tmp_path / "index"
+
+    f = data_dir / "test.md"
+    f.write_text("固定不变的文件内容", encoding="utf-8")
+    orig_hash = _compute_content_hash(f)
+    assert len(orig_hash) == 32
+
+    engine = IndexEngine(idx_dir)
+    status = engine.build([data_dir])
+    assert status.doc_count == 1
+
+    # 验证 state.json 原子写入与 content_hash 记录
+    state_file = idx_dir / "state.json"
+    assert state_file.exists()
+    assert not (idx_dir / "state.json.tmp").exists()
+
+    # 验证搜索结果包含 spans 证据区间
+    searcher = SearchEngine(idx_dir)
+    res = searcher.search("固定不变")
+    assert res.total_matches == 1
+    hit = res.hits[0]
+    assert len(hit.spans) >= 1
+    assert hit.spans[0].start_line == 1
+    assert "固定不变" in hit.spans[0].text

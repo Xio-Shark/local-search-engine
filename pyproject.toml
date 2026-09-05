@@ -1,7 +1,7 @@
 [project]
 name = "lse"
-version = "0.1.0"
-description = "Local search engine for career knowledge base (tantivy-backed)"
+version = "0.2.0"
+description = "Modern local full-text search engine with dynamic evidence resonance spans, code-aware tokenization, and formal query AST"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [

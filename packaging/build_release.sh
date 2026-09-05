@@ -7,7 +7,7 @@
 # 用法: bash packaging/build_release.sh [version]
 set -euo pipefail
 
-VERSION="${1:-0.1.0}"
+VERSION="${1:-0.2.0}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DIST="$ROOT/dist"
 OUT="$ROOT/release"
