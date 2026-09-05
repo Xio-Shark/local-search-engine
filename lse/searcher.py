@@ -1,7 +1,10 @@
-"""搜索引擎：BM25 查询 + 高亮 + 字段过滤。
+"""搜索引擎：BM25 查询 + AST 解析 + 动态局部共振证据区间。
 
-查询输入交由 tantivy parse_query，结合 CJK 扩展、字段别名翻译、
-数值/日期范围查询转换与 fast-field 原生排序。返回自定义 SearchHit 列表。
+基于 Tantivy 索引与递归下降 AST 解析器，支持：
+1. 形式化 DSL 编译与字段别名翻译 (ext, type, filename, size, mtime)
+2. CJK 与代码混合词项自适应短语加权与容错展开
+3. 基于能量波函数的动态连续证据区间提取 (Evidence Spans)，消灭固定分块截断
+4. Fast-Field 原生排序与范围过滤
 """
 
 from __future__ import annotations
@@ -10,40 +13,27 @@ import re
 from datetime import datetime
 from pathlib import Path
 
-import tantivy
 
 from .config import (
     DEFAULT_INDEX_DIR,
-    DEFAULT_SEARCH_LIMIT,
     DEFAULT_SEARCH_FIELDS,
+    DEFAULT_SEARCH_LIMIT,
     SNIPPET_CONTEXT_CHARS,
     SNIPPET_MAX_COUNT,
 )
 from .indexer import IndexEngine
 from .model import SearchHit, SearchResult
+from .query_ast import QueryCompiler
+from .resonance import extract_evidence_spans
 from .schema import register_tokenizers
-
-# 匹配 field: 前缀（如 ext:md、filename:readme.md）
-_FIELD_PREFIX_RE = re.compile(r"([a-zA-Z_]+):")
+from .tokenizer import tokenize_stream
 
 
 class SearchEngine:
     """查询入口。
 
     与 IndexEngine 共享同一 index_dir；查询前 reload 以看到最新提交。
-    查询 DSL 中常用别名自动翻译：ext→extension、type→doc_type、name→filename。
     """
-
-    _FIELD_ALIASES = {
-        "ext": "extension",
-        "type": "doc_type",
-        "name": "filename",
-        "filename": "filename",
-        "path": "path",
-        "size": "size",
-        "mtime": "mtime",
-        "content": "content",
-    }
 
     def __init__(self, index_dir: Path = DEFAULT_INDEX_DIR) -> None:
         self.index_dir = Path(index_dir)
@@ -60,31 +50,26 @@ class SearchEngine:
         self.index.reload()
         searcher = self.index.searcher()
 
-        # 1. 抽取 sort: 排序指令（如 sort:mtime, sort:size:asc）
-        cleaned_query, sort_field, sort_order = self._extract_sort(query)
+        # 1. 形式化 AST 编译：提取排序指令、翻译别名与自适应展开
+        compiler = QueryCompiler(query)
+        compiled_query, sort_field, sort_order = compiler.compile()
 
-        # 2. 翻译别名与范围语法 (size:.. / mtime:..)
-        translated = self._translate_query(cleaned_query)
-
-        # 3. 对中文长词合理扩展（带括号与原短语加权，不污染布尔与字段过滤）
-        expanded = self._expand_cjk_query(translated)
-
-        # 4. 若去除排序指令后 query 为空，默认检索全部文档
-        effective_query = expanded.strip() or "*"
+        # 2. 若去除排序指令后 query 为空，默认检索全部文档
+        effective_query = compiled_query.strip() or "*"
         parsed = self.index.parse_query(
             effective_query,
             DEFAULT_SEARCH_FIELDS,
             conjunction_by_default=True,
         )
 
-        # 5. 执行搜索（带排序或原生 BM25 相关性打分）
+        # 3. 执行搜索（带排序或原生 BM25 相关性打分）
         limit_val = min(max(limit, 1), 1000)
         if sort_field:
             hits = searcher.search(parsed, limit_val, order_by_field=sort_field, order=sort_order)
         else:
             hits = searcher.search(parsed, limit_val)
 
-        results = self._to_hits(searcher, hits, cleaned_query)
+        results = self._to_hits(searcher, hits, query)
         elapsed_ms = int((datetime.now() - start).total_seconds() * 1000)
         return SearchResult(
             query=query,
@@ -93,107 +78,9 @@ class SearchEngine:
             elapsed_ms=elapsed_ms,
         )
 
-    def _extract_sort(self, query: str) -> tuple[str, str | None, tantivy.Order]:
-        """提取并在查询串中剥离 sort:field 指令。"""
-        sort_match = re.search(r"\bsort:([a-zA-Z_]+)(?::(asc|desc))?\b", query, flags=re.IGNORECASE)
-        sort_field = None
-        sort_order = tantivy.Order.Desc
-        if sort_match:
-            field_name = sort_match.group(1).lower()
-            direction = (sort_match.group(2) or "desc").lower()
-            if field_name in ("mtime", "size"):
-                sort_field = field_name
-                sort_order = tantivy.Order.Asc if direction == "asc" else tantivy.Order.Desc
-            query = query[:sort_match.start()] + " " + query[sort_match.end():]
-            query = query.strip()
-        return query, sort_field, sort_order
-
-    def _expand_cjk_query(self, query: str) -> str:
-        """对普通查询项中连续 >=4 字的 CJK 词进行扩展，同时保留短语高权重与双字召回。
-
-        被引号包裹的短语、字段过滤表达式（如 ext:md、path:...）保持原样不变。
-        扩展结果强制使用括号包裹，确保在 conjunction_by_default 下与其他条件保持 AND 语义。
-        """
-        if not query:
-            return query
-
-        pattern = re.compile(
-            r'("[^"]*")|'                                  # Group 1: quoted string
-            r'([a-zA-Z_]+:(?:\[[^\]]*\]|"[^"]*"|\S+))|'  # Group 2: field filter
-            r'(\S+)'                                       # Group 3: plain term
-        )
-
-        out = []
-        for m in pattern.finditer(query):
-            quoted, field_filter, term = m.groups()
-            if quoted:
-                out.append(quoted)
-            elif field_filter:
-                out.append(field_filter)
-            elif term:
-                # 连续 CJK 汉字 >= 4 个字符且未包含操作符
-                if re.fullmatch(r"[\u4e00-\u9fff]{4,}", term):
-                    grams = [term[i : i + 2] for i in range(len(term) - 1)]
-                    expanded = f'("{term}"^5 OR {" OR ".join(grams)})'
-                    out.append(expanded)
-                else:
-                    out.append(term)
-
-        return " ".join(out)
-
-    def _translate_query(self, query: str) -> str:
-        """翻译别名及范围语法。"""
-        # 1. 字段别名翻译（ext->extension 等）
-        def replace_alias(match: re.Match[str]) -> str:
-            field = match.group(1)
-            target = self._FIELD_ALIASES.get(field.lower())
-            if target and target != field.lower():
-                return target + ":"
-            return match.group(0)
-
-        query = _FIELD_PREFIX_RE.sub(replace_alias, query)
-
-        # 2. size 范围翻译（支持 10KB..5MB 或 100..5000）
-        def parse_bytes(val: str) -> int:
-            val = val.strip().upper()
-            if val.endswith("KB"):
-                return int(float(val[:-2]) * 1024)
-            elif val.endswith("MB"):
-                return int(float(val[:-2]) * 1024 * 1024)
-            elif val.endswith("GB"):
-                return int(float(val[:-2]) * 1024 * 1024 * 1024)
-            elif val.endswith("B"):
-                return int(val[:-1])
-            return int(val)
-
-        def replace_size_range(m):
-            start = parse_bytes(m.group(1)) if m.group(1) else "*"
-            end = parse_bytes(m.group(2)) if m.group(2) else "*"
-            return f"size:[{start} TO {end}]"
-
-        query = re.sub(
-            r"\bsize:(\d+(?:\.\d+)?(?:[KMGT]?B)?)\.\.(\d+(?:\.\d+)?(?:[KMGT]?B)?)\b",
-            replace_size_range,
-            query,
-            flags=re.IGNORECASE,
-        )
-
-        # 3. mtime 日期范围翻译 (mtime:2025-01-01..2025-12-31)
-        def replace_date_range(m):
-            start = f"{m.group(1)}T00:00:00Z" if m.group(1) else "*"
-            end = f"{m.group(2)}T23:59:59Z" if m.group(2) else "*"
-            return f"mtime:[{start} TO {end}]"
-
-        query = re.sub(
-            r"\bmtime:(\d{4}-\d{2}-\d{2})\.\.(\d{4}-\d{2}-\d{2})\b",
-            replace_date_range,
-            query,
-        )
-
-        return query
-
     def _to_hits(self, searcher, search_result, query: str) -> list[SearchHit]:
         hits: list[SearchHit] = []
+        terms = _query_terms(query)
         for score, address in search_result.hits:
             doc = searcher.doc(address)
             try:
@@ -207,6 +94,14 @@ class SearchEngine:
                 score_val = float(score)
             except (TypeError, ValueError):
                 score_val = 0.0
+
+            # 求解连续局部共振证据区间
+            spans = extract_evidence_spans(content, terms)
+            if spans:
+                snippets = [s.text for s in spans]
+            else:
+                snippets = self._fallback_snippets(content, query)
+
             hits.append(
                 SearchHit(
                     path=path_str,
@@ -216,13 +111,14 @@ class SearchEngine:
                     size=doc.get_first("size") or 0,
                     mtime=mtime,
                     score=score_val,
-                    snippets=self._snippets(content, query),
+                    snippets=snippets,
+                    spans=spans,
                 )
             )
         return hits
 
-    def _snippets(self, content: str, query: str) -> list[str]:
-        """从内容提取含查询词片段（多窗口截取，合并重叠区域）。"""
+    def _fallback_snippets(self, content: str, query: str) -> list[str]:
+        """后备摘要提取（当波函数未能提取有效证据跨度时兜底）。"""
         if not content:
             return []
         terms = _query_terms(query)
@@ -277,23 +173,11 @@ def _query_terms(query: str) -> list[str]:
     cleaned = re.sub(r"[a-zA-Z_]+:(?:\[[^\]]*\]|\"[^\"]*\"|\S+)", " ", query)
     # 过滤布尔操作符与括号符号
     cleaned = re.sub(r"\b(AND|OR|NOT)\b|[()\"^0-9]+", " ", cleaned)
-    parts = re.findall(r"[A-Za-z0-9_]+|[\u4e00-\u9fff]+", cleaned.lower())
-    terms: list[str] = []
-    for part in parts:
-        part = part.strip()
-        if not part:
-            continue
-        if re.match(r"^[a-z0-9_]+$", part):
-            terms.append(part)
-        else:
-            terms.append(part)
-            if len(part) > 2:
-                terms.extend(part[i : i + 2] for i in range(len(part) - 1))
-
+    tokens = tokenize_stream(cleaned)
     seen: set[str] = set()
     unique: list[str] = []
-    for t in terms:
-        if t not in seen:
+    for t in tokens:
+        if t and t not in seen:
             seen.add(t)
             unique.append(t)
     return unique
@@ -305,7 +189,6 @@ def _parse_mtime(value) -> datetime:
     if isinstance(value, datetime):
         return value
     try:
-        # Tantivy date fast field returns nanoseconds since epoch
         val_float = float(value)
         if val_float > 1e14:  # nanoseconds
             val_float = val_float / 1e9

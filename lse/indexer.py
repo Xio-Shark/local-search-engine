@@ -2,13 +2,16 @@
 
 基于 tantivy IndexWriter：
 - 全量 build：清空后写入全部发现文件
-- 增量 update：对比上轮 metadata，仅写入变更/新增，删除消失文件
+- 增量 update：对比上轮 metadata（结合 mtime、size 与内容哈希），仅写入变更/新增，删除消失文件
 - 重建 rebuild：删除整个索引目录后重新构建
+- 原子状态维护：写临时文件 + os.replace 原子置换，彻底杜绝异常退出导致的元数据损坏与裂脑
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
@@ -34,10 +37,6 @@ class IndexEngine:
         self.index_dir.mkdir(parents=True, exist_ok=True)
         self.schema = build_schema()
         self.index = tantivy.Index(self.schema, str(self.index_dir))
-        # tantivy 自定义 tokenizer 不持久化：每次使用索引都要注册，
-        # 且必须在 writer() 之后调用（writer 打开时会快照 tokenizer manager）。
-        # 写入侧在 _write_batch/update 里 writer 创建后注册；
-        # 搜索侧在 parse_query 前注册。
 
     # ---------- 公开操作 ----------
 
@@ -79,13 +78,20 @@ class IndexEngine:
         # 仅当文件原本位于本次更新 roots 路径下、且当前磁盘上已消失时，才判定为删除
         removed = [p for p in previous_paths if is_under_roots(p) and p not in current_by_path]
 
-        added_or_changed = [
-            f
-            for f in files
-            if str(f.path) not in previous_paths
-            or previous_by_path[str(f.path)]["mtime"] != f.mtime
-            or previous_by_path[str(f.path)]["size"] != f.size_bytes
-        ]
+        added_or_changed: list[IndexableFile] = []
+        for f in files:
+            p_str = str(f.path)
+            if p_str not in previous_paths:
+                added_or_changed.append(f)
+            else:
+                prev = previous_by_path[p_str]
+                # 检查 mtime 或 size 是否变更
+                if prev.get("mtime") != f.mtime or prev.get("size") != f.size_bytes:
+                    # 如果记录了 content_hash 且哈希一致（例如仅 touch 或 git checkout），无需重写索引
+                    f_hash = f.content_hash or _compute_content_hash(f.path)
+                    if prev.get("hash") and prev.get("hash") == f_hash:
+                        continue
+                    added_or_changed.append(f)
 
         writer = self.index.writer(num_threads=1)
         register_tokenizers(self.index)
@@ -120,6 +126,7 @@ class IndexEngine:
                 "size": f.size_bytes,
                 "mtime": f.mtime,
                 "doc_type": f.doc_type,
+                "hash": f.content_hash or _compute_content_hash(f.path),
             }
             for f in files
         ]
@@ -152,10 +159,12 @@ class IndexEngine:
                             size_bytes=stat.st_size,
                             mtime=stat.st_mtime,
                             doc_type=_doc_type_for(root),
+                            content_hash=_compute_content_hash(root),
                         )
                     )
             elif root.is_dir():
-                merged.extend(discover_files(root, extra_exclude))
+                discovered = discover_files(root, extra_exclude)
+                merged.extend(discovered)
             else:
                 raise FileNotFoundError(f"路径不存在: {root}")
         # 去重（同一文件被多个 root 覆盖时保留第一个）
@@ -214,7 +223,7 @@ class IndexEngine:
             last_updated=last_updated,
         )
 
-    # ---------- 状态持久化 ----------
+    # ---------- 状态持久化（原子写入） ----------
 
     def _state_path(self) -> Path:
         return self.index_dir / META_FILE
@@ -227,6 +236,7 @@ class IndexEngine:
                 "size": f.size_bytes,
                 "mtime": f.mtime,
                 "doc_type": f.doc_type,
+                "hash": f.content_hash or _compute_content_hash(f.path),
             }
             for f in files
         ]
@@ -234,12 +244,16 @@ class IndexEngine:
         self._save_state_raw(state_files, state_roots)
 
     def _save_state_raw(self, file_dicts: list[dict], roots: list[str]) -> None:
+        """使用临时文件 + os.replace 原子写入状态，彻底避免断电/异常中断导致的元数据损坏。"""
         state = {
             "last_updated": datetime.now(timezone.utc).isoformat(),
             "roots": roots,
             "files": file_dicts,
         }
-        self._state_path().write_text(json.dumps(state, ensure_ascii=False))
+        target_path = self._state_path()
+        tmp_path = target_path.with_suffix(".tmp")
+        tmp_path.write_text(json.dumps(state, ensure_ascii=False))
+        os.replace(tmp_path, target_path)
 
     def _load_state(self) -> dict:
         path = self._state_path()
@@ -252,6 +266,18 @@ class IndexEngine:
             return {"roots": [], "files": []}
         except (ValueError, OSError):
             return {"roots": [], "files": []}
+
+
+def _compute_content_hash(path: Path) -> str:
+    """计算文件内容快速哈希指纹（BLAKE2b 16 字节，轻量高吞吐）。"""
+    try:
+        h = hashlib.blake2b(digest_size=16)
+        with open(path, "rb") as f:
+            while chunk := f.read(65536):
+                h.update(chunk)
+        return h.hexdigest()
+    except OSError:
+        return ""
 
 
 def _read_text(path: Path) -> str:

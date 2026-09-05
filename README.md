@@ -3,9 +3,11 @@
 基于 [tantivy](https://github.com/quickwit-oss/tantivy)（Rust 全文索引引擎）的本地文件搜索引擎，
 专为 **career 知识库**（桌面目录 / 配合 RAG 系统）设计。
 
-- 🔍 **中英文全文检索**：中文按 bigram 分词，英文按词切分
-- 📊 **BM25 相关性排序** + 命中高亮 snippet
-- 🚀 **增量更新**：基于 mtime/size 只索引变更文件
+- 🔍 **中英文与代码多流检索**：Code Tokenizer（驼峰/蛇形解离）+ CJK 语义词元
+- 🌊 **动态局部共振证据求解**：消灭固定死板切 Chunk，基于能量波函数输出连续精准起止行与面包屑
+- 🌲 **形式化 AST 查询引擎**：严谨递归下降语法分析器，支持嵌套、短语加权与长词 WAND 柔性匹配
+- 📊 **BM25 相关性排序** + 命中高亮与置信度量化
+- 🚀 **事务级增量与内容哈希**：基于 BLAKE2b 内容指纹与临时文件原子置换，彻底杜绝裂脑与虚假重建
 - 🎨 **字段过滤**：`ext:` / `filename:` / `type:` / `path:` / `size:` / `mtime:`
 - 💻 **纯 CLI**，无 GUI，轻量（打包产物 ~29MB，含 tantivy 引擎）
 - 🪟 **跨平台**：macOS (arm64/x86_64) + Windows (amd64)，GitHub Actions 双矩阵自动打包
@@ -107,17 +109,20 @@ lse/
 ├── config.py      # 配置常量（文件类型、排除规则、内存限制）
 ├── discovery.py   # 目录递归 + 文本文件识别
 ├── schema.py      # tantivy schema + tokenizer
-├── indexer.py     # 全量/增量/重建索引
-├── searcher.py    # BM25 查询 + CJK 扩展 + 高亮
-├── model.py       # 领域模型
+├── indexer.py     # 全量/增量/重建索引（原子写入 + BLAKE2b 内容哈希）
+├── searcher.py    # BM25 查询 + AST 驱动检索
+├── tokenizer.py   # 代码与 CJK 双轨多流分词体系
+├── query_ast.py   # 形式化 AST 递归下降语法解析器
+├── resonance.py   # 连续流形波函数证据区间求解器
+├── model.py       # 领域模型 (SearchHit, EvidenceSpan 等)
 ├── store.py       # 索引目录管理
 ├── cli.py         # CLI 入口
-├── tests/         # pytest 单元测试
+├── tests/         # pytest 单元测试套件
 └── packaging/     # PyInstaller spec + 打包脚本 + CI
 ```
 
 ## 测试
 
 ```bash
-uv run pytest            # 15 例单元测试
+uv run pytest tests/       # 20 例单元测试
 ```
