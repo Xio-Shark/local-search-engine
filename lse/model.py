@@ -1,10 +1,14 @@
-"""领域模型：索引文档与搜索结果对外形态。"""
+"""领域模型：索引文档、证据区间与搜索结果对外形态。"""
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    pass
 
 
 @dataclass(frozen=True)
@@ -16,6 +20,7 @@ class IndexableFile:
     size_bytes: int
     mtime: float  # epoch seconds
     doc_type: str
+    content_hash: str = ""  # 内容指纹，用于抗 touch/git 切换误伤
 
 
 @dataclass(frozen=True)
@@ -29,6 +34,7 @@ class IndexedDoc:
     size: int
     mtime: datetime
     doc_type: str
+    code_terms: str = ""  # 解离的代码符号流
 
 
 @dataclass(frozen=True)
@@ -43,6 +49,7 @@ class SearchHit:
     mtime: datetime
     score: float
     snippets: list[str] = field(default_factory=list)
+    spans: list[Any] = field(default_factory=list)  # list[EvidenceSpan]
 
 
 @dataclass(frozen=True)

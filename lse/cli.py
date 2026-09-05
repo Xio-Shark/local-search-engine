@@ -190,9 +190,21 @@ def _print_text_result(result: SearchResult) -> None:
     for i, hit in enumerate(result.hits, 1):
         print("─────────────────────────────────")
         print(f"{i}. {hit.path} (score: {hit.score:.4f})")
-        for snippet in hit.snippets:
-            print(f"   {_highlight_snippet(snippet, result.query)}")
-        print()
+        if getattr(hit, "spans", None):
+            for span in hit.spans:
+                loc_info = f"L{span.start_line}-L{span.end_line}"
+                meta_parts = [loc_info]
+                if span.breadcrumbs:
+                    meta_parts.append(span.breadcrumbs)
+                meta_parts.append(f"{int(span.confidence * 100)}% 证据共振")
+                print(f"   \033[2m[{ ' | '.join(meta_parts) }]\033[0m")
+                for line in span.highlighted_text.splitlines():
+                    print(f"   {line}")
+                print()
+        else:
+            for snippet in hit.snippets:
+                print(f"   {_highlight_snippet(snippet, result.query)}")
+            print()
     print(f"📊 共 {result.total_matches} 条匹配，用时 {result.elapsed_ms}ms")
 
 
@@ -212,6 +224,16 @@ def _result_to_json(result: SearchResult) -> str:
                     "mtime": h.mtime.isoformat(),
                     "score": h.score,
                     "snippets": h.snippets,
+                    "spans": [
+                        {
+                            "start_line": s.start_line,
+                            "end_line": s.end_line,
+                            "breadcrumbs": s.breadcrumbs,
+                            "confidence": s.confidence,
+                            "text": s.text,
+                        }
+                        for s in getattr(h, "spans", [])
+                    ],
                 }
                 for h in result.hits
             ],
