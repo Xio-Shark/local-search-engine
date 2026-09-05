@@ -29,7 +29,7 @@ def main(argv: list[str] | None = None) -> int:
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="lse",
-        description="🔍 本地全文本搜索引擎（tantivy + 中文 bigram）",
+        description="🔍 现代本地全文搜索引擎（动态共振证据区间 + 代码/CJK双轨分词 + 形式化AST）",
     )
     parser.add_argument("--version", action="version", version=f"lse {__version__}")
     parser.add_argument(

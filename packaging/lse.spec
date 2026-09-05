@@ -20,6 +20,9 @@ a = Analysis(
     datas=[],
     hiddenimports=[
         "tantivy",
+        "lse.tokenizer",
+        "lse.query_ast",
+        "lse.resonance",
     ],
     hookspath=[],
     runtime_hooks=[],
