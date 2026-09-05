@@ -162,6 +162,7 @@ class QueryCompiler:
         tokens = lexer.tokenize()
 
         compiled_parts: list[str] = []
+        open_parens = 0
 
         for tok in tokens:
             if tok.type == TokenType.SORT:
@@ -174,16 +175,39 @@ class QueryCompiler:
             elif tok.type == TokenType.TERM:
                 compiled_parts.append(self._compile_term(tok.value))
             elif tok.type in (TokenType.AND, TokenType.OR, TokenType.NOT):
-                compiled_parts.append(tok.value)
+                # 避免连续重复操作符
+                if compiled_parts and compiled_parts[-1] in ("AND", "OR", "NOT"):
+                    compiled_parts[-1] = tok.value
+                else:
+                    compiled_parts.append(tok.value)
             elif tok.type == TokenType.LPAREN:
+                open_parens += 1
                 compiled_parts.append("(")
             elif tok.type == TokenType.RPAREN:
-                compiled_parts.append(")")
+                if open_parens > 0:
+                    open_parens -= 1
+                    compiled_parts.append(")")
+                # 忽略多余的未匹配闭合括号
 
-        # 整理语句，避免空括号或悬挂操作符
+        # 自愈：补齐所有未闭合的左括号
+        while open_parens > 0:
+            compiled_parts.append(")")
+            open_parens -= 1
+
+        # 清除开头和末尾悬挂的布尔运算符
+        while compiled_parts and compiled_parts[0] in ("AND", "OR"):
+            compiled_parts.pop(0)
+        while compiled_parts and compiled_parts[-1] in ("AND", "OR", "NOT"):
+            compiled_parts.pop()
+
+        # 整理语句，清理多余空括号
         result_query = " ".join(compiled_parts).strip()
-        # 清理多余空括号
         result_query = re.sub(r"\(\s*\)", "", result_query).strip()
+        # 清除类似 ( AND 或 OR ) 的非法嵌套运算符
+        result_query = re.sub(r"\(\s*(?:AND|OR)\s+", "(", result_query)
+        result_query = re.sub(r"\s+(?:AND|OR|NOT)\s*\)", ")", result_query)
+        result_query = re.sub(r"\(\s*\)", "", result_query).strip()
+
         return result_query, self.sort_field, self.sort_order
 
     def _handle_sort(self, sort_expr: str) -> None:
@@ -244,6 +268,19 @@ class QueryCompiler:
             grams = [term[i : i + 2] for i in range(len(term) - 1)]
             grams_expr = " OR ".join(grams)
             return f'("{term}"^5 OR {grams_expr})'
+
+        # 中英混排（如 目录A、C++多线程、GPT-4o架构）
+        if re.search(r"[\u4e00-\u9fff]", term) and re.search(r"[a-zA-Z0-9]", term):
+            from .tokenizer import tokenize_stream
+            parts = [t for t in tokenize_stream(term) if t]
+            seen = set()
+            unique_parts = []
+            for p in parts:
+                if p not in seen:
+                    seen.add(p)
+                    unique_parts.append(p)
+            if len(unique_parts) > 1:
+                return f'({" AND ".join(unique_parts)})'
 
         # 西文、数字或代码符号
         return term

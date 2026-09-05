@@ -11,7 +11,7 @@ if TYPE_CHECKING:
     pass
 
 
-@dataclass(frozen=True)
+@dataclass
 class IndexableFile:
     """一个待索引文件的基本信息。"""
 

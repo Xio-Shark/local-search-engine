@@ -1,15 +1,14 @@
-"""代码与自然语言多流分词体系。
-
-提供：
-1. Code Tokenizer：智能解离驼峰命名 (camelCase)、蛇形命名 (snake_case)、代码路径与符号
-2. CJK & Mixed Tokenizer：支持中英混排（如 "GPT-4o架构"、"C++多线程"）、精准词元提取与双字/单字平滑回退
-3. 文本归一化 (NFKC + 大小写规约)
-"""
-
 from __future__ import annotations
 
 import re
 import unicodedata
+
+try:
+    import jieba
+    # Suppress jieba prefix dict initialization logs
+    jieba.default_logger.setLevel(60)
+except ImportError:
+    jieba = None
 
 # CJK 汉字区间
 _CJK_PATTERN = re.compile(r"[\u4e00-\u9fff]+")
@@ -49,11 +48,16 @@ def split_identifier(identifier: str) -> list[str]:
         camel_split = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", part)
         # 在连续大写字母与后续小写字母之间插入切分点 (如 XMLReader -> XML Reader)
         camel_split = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1 \2", camel_split)
-        
+
         words = [w.lower() for w in camel_split.split() if w]
         sub_tokens.extend(words)
         if len(words) > 1:
             sub_tokens.append("".join(words))
+
+    # 针对带有语言符号后缀的标识符（如 C++, C#, F#），解离出基础字母以支持单字母语言检索
+    base_alpha = re.sub(r"[+#]+$", "", identifier).strip()
+    if base_alpha and base_alpha.lower() not in sub_tokens:
+        sub_tokens.append(base_alpha.lower())
 
     # 结果去重并包含原标识符归一化形式
     cleaned_original = re.sub(r"\s+", "", identifier.lower())
@@ -70,28 +74,42 @@ def split_identifier(identifier: str) -> list[str]:
 
 
 def tokenize_cjk_run(cjk_text: str) -> list[str]:
-    """对连续 CJK 汉字段进行多粒度展开（整词 + 2-gram + 1-gram 备选）。
+    """对连续 CJK 汉字段进行词级与多粒度展开（Jieba 词库 + 2-gram + 1-gram 备选）。
 
     保证：
-    1. 短语完整性优先（原词最高权重）
-    2. 2-gram 满足紧凑倒排
-    3. 1-gram 保证单汉字召回不丢失
+    1. 真实词级语义分词（高区分度 BM25 IDF）
+    2. 短语完整性优先（原短语保留）
+    3. 2-gram 满足无词典词的紧凑倒排
+    4. 1-gram 保证单汉字召回绝对不丢失
     """
     length = len(cjk_text)
     if length == 0:
         return []
     if length == 1:
         return [cjk_text]
-    if length == 2:
-        return [cjk_text, cjk_text[0], cjk_text[1]]
 
     tokens: list[str] = []
-    # 1. 保留整词
-    tokens.append(cjk_text)
-    # 2. 连续 2-gram
+
+    # 1. 词级分词 (Jieba cut for search)
+    if jieba is not None:
+        try:
+            jieba_words = [w.strip() for w in jieba.cut_for_search(cjk_text) if w.strip()]
+            tokens.extend(jieba_words)
+        except Exception:
+            pass
+
+    # 2. 保留整词与核心实词短语（供短语精确匹配）
+    if length <= 24:
+        tokens.append(cjk_text)
+        clean_cjk = cjk_text.strip("的在和是与及于了或包含着把被由从")
+        if clean_cjk and clean_cjk != cjk_text and len(clean_cjk) >= 2:
+            tokens.append(clean_cjk)
+
+    # 3. 连续 2-gram
     for i in range(length - 1):
         tokens.append(cjk_text[i : i + 2])
-    # 3. 单字（供单汉字检索命中）
+
+    # 4. 单字（供单汉字检索命中）
     for ch in cjk_text:
         tokens.append(ch)
 
@@ -99,7 +117,7 @@ def tokenize_cjk_run(cjk_text: str) -> list[str]:
     seen = set()
     ordered = []
     for t in tokens:
-        if t not in seen:
+        if t and t not in seen:
             seen.add(t)
             ordered.append(t)
     return ordered
@@ -127,3 +145,14 @@ def tokenize_stream(text: str) -> list[str]:
             tokens.extend(split_identifier(id_part))
 
     return tokens
+
+
+def prepare_index_tokens(text: str) -> str:
+    """为 Tantivy 倒排索引生成空格分隔的多流词元文本。
+
+    确保代码标识符解离与 CJK 词级切分真正写入倒排索引，使得 BM25 能够基于真正的词元（Word-level tokens）计算 IDF。
+    """
+    if not text:
+        return ""
+    tokens = tokenize_stream(text)
+    return " ".join(tokens)

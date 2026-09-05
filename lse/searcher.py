@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import math
 import re
 from datetime import datetime
 from pathlib import Path
@@ -56,11 +57,28 @@ class SearchEngine:
 
         # 2. 若去除排序指令后 query 为空，默认检索全部文档
         effective_query = compiled_query.strip() or "*"
-        parsed = self.index.parse_query(
-            effective_query,
-            DEFAULT_SEARCH_FIELDS,
-            conjunction_by_default=True,
-        )
+        try:
+            parsed = self.index.parse_query(
+                effective_query,
+                DEFAULT_SEARCH_FIELDS,
+                conjunction_by_default=True,
+            )
+        except ValueError:
+            # 自愈降级 1：使用 Tantivy 容错分析器
+            try:
+                parsed, _ = self.index.parse_query_lenient(
+                    effective_query,
+                    DEFAULT_SEARCH_FIELDS,
+                    conjunction_by_default=True,
+                )
+            except Exception:
+                # 自愈降级 2：剔除敏感操作符转为字面短语匹配，杜绝异常泄露
+                escaped = re.sub(r'["*+?^=!:{}\[\]()|\\\/~]', " ", query).strip()
+                parsed = self.index.parse_query(
+                    f'"{escaped}"' if escaped else "*",
+                    DEFAULT_SEARCH_FIELDS,
+                    conjunction_by_default=True,
+                )
 
         # 3. 执行搜索（带排序或原生 BM25 相关性打分）
         limit_val = min(max(limit, 1), 1000)
@@ -81,22 +99,24 @@ class SearchEngine:
     def _to_hits(self, searcher, search_result, query: str) -> list[SearchHit]:
         hits: list[SearchHit] = []
         terms = _query_terms(query)
+        term_weights = {t: math.log1p(len(t)) for t in terms}
+
         for score, address in search_result.hits:
             doc = searcher.doc(address)
             try:
                 path = doc.get_first("path")
-                content = doc.get_first("content") or ""
             except (AttributeError, TypeError):
                 continue
             path_str = str(path)
+            content = _read_disk_file(path_str)
             mtime = _parse_mtime(doc.get_first("mtime"))
             try:
                 score_val = float(score)
             except (TypeError, ValueError):
                 score_val = 0.0
 
-            # 求解连续局部共振证据区间
-            spans = extract_evidence_spans(content, terms)
+            # 求解连续局部共振证据区间（IDF 加权 + 符号感知）
+            spans = extract_evidence_spans(content, terms, term_weights=term_weights)
             if spans:
                 snippets = [s.text for s in spans]
             else:
@@ -165,14 +185,31 @@ class SearchEngine:
         return snippets
 
 
+def _read_disk_file(path_str: str) -> str:
+    """零存储架构：从本地磁盘直接读取文档全文。"""
+    try:
+        p = Path(path_str)
+        if not p.exists():
+            return ""
+        try:
+            return p.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            try:
+                return p.read_text(encoding="gbk")
+            except (UnicodeDecodeError, OSError):
+                return p.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+
+
 def _query_terms(query: str) -> list[str]:
-    """从查询提取用于高亮和定位的搜索词，过滤字段前缀与操作符。"""
+    """从查询提取用于高亮和定位的搜索词，保留版本号与技术名词中的数字。"""
     if not query:
         return []
     # 过滤字段过滤表达式
     cleaned = re.sub(r"[a-zA-Z_]+:(?:\[[^\]]*\]|\"[^\"]*\"|\S+)", " ", query)
-    # 过滤布尔操作符与括号符号
-    cleaned = re.sub(r"\b(AND|OR|NOT)\b|[()\"^0-9]+", " ", cleaned)
+    # 过滤布尔操作符与括号符号（注意：保留数字 0-9，避免截断 GPT-4o、C++17 等）
+    cleaned = re.sub(r"\b(AND|OR|NOT)\b|[()\"^]+", " ", cleaned)
     tokens = tokenize_stream(cleaned)
     seen: set[str] = set()
     unique: list[str] = []
