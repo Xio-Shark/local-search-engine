@@ -22,6 +22,7 @@ from .config import DEFAULT_INDEX_DIR
 from .discovery import discover_files, is_text_file
 from .model import IndexStatus, IndexableFile
 from .schema import build_schema, register_tokenizers, to_epoch_mtime
+from .tokenizer import prepare_index_tokens
 
 META_FILE = "state.json"
 
@@ -78,27 +79,33 @@ class IndexEngine:
         # 仅当文件原本位于本次更新 roots 路径下、且当前磁盘上已消失时，才判定为删除
         removed = [p for p in previous_paths if is_under_roots(p) and p not in current_by_path]
 
-        added_or_changed: list[IndexableFile] = []
+        added_or_changed: list[tuple[IndexableFile, str]] = []
         for f in files:
             p_str = str(f.path)
             if p_str not in previous_paths:
-                added_or_changed.append(f)
+                text, file_hash = _read_and_hash(f.path)
+                f.content_hash = file_hash
+                added_or_changed.append((f, text))
             else:
                 prev = previous_by_path[p_str]
                 # 检查 mtime 或 size 是否变更
                 if prev.get("mtime") != f.mtime or prev.get("size") != f.size_bytes:
+                    text, file_hash = _read_and_hash(f.path)
+                    f.content_hash = file_hash
                     # 如果记录了 content_hash 且哈希一致（例如仅 touch 或 git checkout），无需重写索引
-                    f_hash = f.content_hash or _compute_content_hash(f.path)
-                    if prev.get("hash") and prev.get("hash") == f_hash:
+                    if prev.get("hash") and prev.get("hash") == file_hash:
                         continue
-                    added_or_changed.append(f)
+                    added_or_changed.append((f, text))
+                else:
+                    # 元数据未发生任何变化：直接复用上一轮哈希，彻底杜绝无意义磁盘重读
+                    f.content_hash = prev.get("hash", "")
 
-        writer = self.index.writer(num_threads=1)
+        writer = self.index.writer(heap_size=128_000_000, num_threads=0)
         register_tokenizers(self.index)
         try:
             for path in removed:
                 writer.delete_documents_by_term("path", path)
-            for f in added_or_changed:
+            for f, text in added_or_changed:
                 writer.delete_documents_by_term("path", str(f.path))
                 writer.add_document(
                     tantivy.Document.from_dict(
@@ -106,7 +113,7 @@ class IndexEngine:
                             "path": str(f.path),
                             "filename": f.path.name,
                             "extension": f.extension.lstrip("."),
-                            "content": _read_text(f.path),
+                            "content": prepare_index_tokens(text),
                             "size": f.size_bytes,
                             "mtime": to_epoch_mtime(f.mtime),
                             "doc_type": f.doc_type,
@@ -126,7 +133,7 @@ class IndexEngine:
                 "size": f.size_bytes,
                 "mtime": f.mtime,
                 "doc_type": f.doc_type,
-                "hash": f.content_hash or _compute_content_hash(f.path),
+                "hash": f.content_hash,
             }
             for f in files
         ]
@@ -178,17 +185,19 @@ class IndexEngine:
         return unique
 
     def _write_batch(self, files: list[IndexableFile]) -> None:
-        writer = self.index.writer(num_threads=4)
+        writer = self.index.writer(heap_size=128_000_000, num_threads=0)
         register_tokenizers(self.index)
         try:
             for f in files:
+                text, file_hash = _read_and_hash(f.path)
+                f.content_hash = file_hash
                 writer.add_document(
                     tantivy.Document.from_dict(
                         {
                             "path": str(f.path),
                             "filename": f.path.name,
                             "extension": f.extension.lstrip("."),
-                            "content": _read_text(f.path),
+                            "content": prepare_index_tokens(text),
                             "size": f.size_bytes,
                             "mtime": to_epoch_mtime(f.mtime),
                             "doc_type": f.doc_type,
@@ -266,6 +275,23 @@ class IndexEngine:
             return {"roots": [], "files": []}
         except (ValueError, OSError):
             return {"roots": [], "files": []}
+
+
+def _read_and_hash(path: Path) -> tuple[str, str]:
+    """单趟流式读取：一次 IO 同时完成 BLAKE2b 16 字节哈希计算与文本安全解码。"""
+    try:
+        raw = path.read_bytes()
+        h = hashlib.blake2b(raw, digest_size=16).hexdigest()
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            try:
+                text = raw.decode("gbk")
+            except (UnicodeDecodeError, OSError):
+                text = raw.decode("utf-8", errors="replace")
+        return text, h
+    except OSError:
+        return "", ""
 
 
 def _compute_content_hash(path: Path) -> str:

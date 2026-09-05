@@ -16,24 +16,25 @@ from datetime import datetime
 
 import tantivy
 
-TOKENIZER_CJK = "lse_cjk"
+TOKENIZER_CONTENT = "lse_content"
 TOKENIZER_RAW = "lse_raw"
 TOKENIZER_RAW_LOWER = "lse_raw_lower"
+TOKENIZER_CJK = TOKENIZER_CONTENT  # 兼容别名
 
 
 def build_schema() -> tantivy.Schema:
     """构建 schema。
 
-    - content 使用 ngram(1,2) + lowercase，支持单字、双字及英文大小写不敏感检索
+    - content 采用 stored=False，基于磁盘原文实现零存储冗余，以 whitespace+lowercase 接收多流词元倒排
     - filename / extension / doc_type 用 raw + lowercase 分词，整值不区分大小写匹配
-    - path 保持 raw 原生大小写，供 delete_documents_by_term 精确操作
+    - path 保持 raw 原生大小写并存储，供命中回显与零拷贝原文直读
     - size / mtime 开启 fast=True 与 indexed=True，支持范围过滤与快速排序
     """
     builder = tantivy.SchemaBuilder()
     builder.add_text_field("path", stored=True, tokenizer_name=TOKENIZER_RAW)
     builder.add_text_field("filename", stored=True, tokenizer_name=TOKENIZER_RAW_LOWER)
     builder.add_text_field("extension", stored=True, tokenizer_name=TOKENIZER_RAW_LOWER)
-    builder.add_text_field("content", stored=True, tokenizer_name=TOKENIZER_CJK)
+    builder.add_text_field("content", stored=False, tokenizer_name=TOKENIZER_CONTENT)
     builder.add_integer_field("size", stored=True, fast=True, indexed=True)
     builder.add_date_field("mtime", stored=True, fast=True, indexed=True)
     builder.add_text_field("doc_type", stored=True, tokenizer_name=TOKENIZER_RAW_LOWER)
@@ -41,15 +42,19 @@ def build_schema() -> tantivy.Schema:
 
 
 def register_tokenizers(index: tantivy.Index) -> None:
-    """在索引上注册自定义 tokenizer（必须在写入文档前调用）。"""
-    cjk_analyzer = (
-        tantivy.TextAnalyzerBuilder(tantivy.Tokenizer.ngram(1, 2, prefix_only=False))
+    """在索引上注册自定义 tokenizer（必须在写入文档与查询解析前调用）。"""
+    # content 使用 whitespace + lowercase，接收 Python 预先解离的代码与语义词元流
+    content_analyzer = (
+        tantivy.TextAnalyzerBuilder(tantivy.Tokenizer.whitespace())
         .filter(tantivy.Filter.lowercase())
         .build()
     )
-    index.register_tokenizer(TOKENIZER_CJK, cjk_analyzer)
+    index.register_tokenizer(TOKENIZER_CONTENT, content_analyzer)
+    index.register_tokenizer("lse_cjk", content_analyzer)
+
     raw_analyzer = tantivy.TextAnalyzerBuilder(tantivy.Tokenizer.raw()).build()
     index.register_tokenizer(TOKENIZER_RAW, raw_analyzer)
+
     raw_lower_analyzer = (
         tantivy.TextAnalyzerBuilder(tantivy.Tokenizer.raw())
         .filter(tantivy.Filter.lowercase())

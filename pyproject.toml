@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
     "tantivy>=0.26,<0.27",
+    "jieba>=0.42.1",
 ]
 
 [project.scripts]

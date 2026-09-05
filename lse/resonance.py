@@ -27,8 +27,69 @@ class EvidenceSpan:
 
 # Markdown 标题识别
 _MD_HEADING_RE = re.compile(r"^(#{1,6})\s+(.+)$")
-# Python / 代码块识别
-_CODE_BLOCK_RE = re.compile(r"^\s*(class|def|func|function|public|private)\s+([a-zA-Z0-9_]+)")
+# 多语言代码块/符号定义识别 (Python, Go, Rust, Java, JS/TS, C/C++)
+_CODE_SYMBOL_RE = re.compile(
+    r"^\s*(?:(?:export|pub|public|private|protected|async|static|final|const)\s+)*"
+    r"(class|def|fn|func|function|struct|interface|trait|enum|type)\s+([a-zA-Z0-9_]+)"
+)
+
+
+def _analyze_structures(lines: list[str]) -> tuple[list[str], list[tuple[int, int] | None]]:
+    """分析行级别结构符号面包屑与封闭块边界。
+
+    返回：
+    - line_breadcrumbs: 每行所属的分层面包屑（如 '用户认证模块 > class TokenValidator > def verify'）
+    - line_blocks: 每行所属语法块的 (start_line, end_line) 起止闭包
+    """
+    num_lines = len(lines)
+    breadcrumbs: list[str] = [""] * num_lines
+    blocks: list[tuple[int, int] | None] = [None] * num_lines
+
+    md_heading_stack: list[tuple[int, str]] = []
+    symbol_stack: list[tuple[int, str, int]] = []  # (indent_or_depth, symbol_name, start_line)
+
+    for idx, line in enumerate(lines):
+        line_clean = line.strip()
+        if not line_clean:
+            # 继承上一行的面包屑
+            if idx > 0:
+                breadcrumbs[idx] = breadcrumbs[idx - 1]
+            continue
+
+        # 1. 检查 Markdown 标题
+        h_match = _MD_HEADING_RE.match(line_clean)
+        if h_match:
+            level = len(h_match.group(1))
+            title = h_match.group(2).strip()
+            while md_heading_stack and md_heading_stack[-1][0] >= level:
+                md_heading_stack.pop()
+            md_heading_stack.append((level, title))
+            # 标题出现时清空代码符号栈
+            symbol_stack.clear()
+
+        # 2. 检查代码符号 (class, def, fn, func, etc.)
+        indent = len(line) - len(line.lstrip())
+        while symbol_stack and indent <= symbol_stack[-1][0] and not line.startswith(" "):
+            symbol_stack.pop()
+
+        sym_match = _CODE_SYMBOL_RE.match(line)
+        if sym_match:
+            kind, name = sym_match.group(1), sym_match.group(2)
+            symbol_str = f"{kind} {name}"
+            while symbol_stack and indent <= symbol_stack[-1][0]:
+                symbol_stack.pop()
+            symbol_stack.append((indent, symbol_str, idx))
+
+        # 3. 汇总当前行面包屑
+        parts = [h[1] for h in md_heading_stack] + [s[1] for s in symbol_stack]
+        if parts:
+            breadcrumbs[idx] = " > ".join(parts)
+
+        if symbol_stack:
+            top_start = symbol_stack[-1][2]
+            blocks[idx] = (top_start, idx)
+
+    return breadcrumbs, blocks
 
 
 def extract_evidence_spans(
@@ -37,15 +98,17 @@ def extract_evidence_spans(
     max_spans: int = 3,
     sigma: float = 2.0,
     window_radius: int = 3,
+    term_weights: dict[str, float] | None = None,
 ) -> list[EvidenceSpan]:
-    """从文本内容中求解并提取动态证据区间。
+    """从文本内容中求解并提取动态结构化证据区间。
 
     参数：
     - content: 文档完整原文
     - query_terms: 查询词元列表
-    - max_spans: 最多返回的高共振证据段数量
-    - sigma: 高斯平滑核标准差
+    - max_spans: 最多返回的证据段数量
+    - sigma: 平滑核标准差
     - window_radius: 局部能量共振窗口半宽
+    - term_weights: 可选的词项 IDF 权重字典，替代简单字符长度
     """
     if not content or not query_terms:
         return []
@@ -55,49 +118,40 @@ def extract_evidence_spans(
     if num_lines == 0:
         return []
 
-    # 1. 维护章节面包屑上下文（行级映射）
-    line_breadcrumbs: list[str] = [""] * num_lines
-    heading_stack: list[tuple[int, str]] = []  # (level, title)
+    # 1. 结构与符号分析
+    line_breadcrumbs, line_blocks = _analyze_structures(lines)
 
-    for idx, line in enumerate(lines):
-        line_clean = line.strip()
-        h_match = _MD_HEADING_RE.match(line_clean)
-        if h_match:
-            level = len(h_match.group(1))
-            title = h_match.group(2).strip()
-            while heading_stack and heading_stack[-1][0] >= level:
-                heading_stack.pop()
-            heading_stack.append((level, title))
-        elif not heading_stack:
-            c_match = _CODE_BLOCK_RE.match(line_clean)
-            if c_match:
-                symbol = f"{c_match.group(1)} {c_match.group(2)}"
-                heading_stack.append((1, symbol))
-
-        if heading_stack:
-            line_breadcrumbs[idx] = " > ".join(h[1] for h in heading_stack)
-
-    # 2. 计算每行词项命中基础能量 E(i)
-    # 词项长度越长、信息量越大，分配越高的瞬时能量权重
     norm_terms = [t.lower().strip() for t in query_terms if t.strip()]
     if not norm_terms:
         return []
 
+    # 2. 计算每行命中能量与词项多样性
     raw_energy = [0.0] * num_lines
+    line_hit_distinct = [0] * num_lines
+
     for idx, line in enumerate(lines):
         lower_line = line.lower()
+        distinct_count = 0
+        line_weight_sum = 0.0
         for term in norm_terms:
             count = lower_line.count(term)
             if count > 0:
-                # 能量权重对数递增
-                weight = math.log1p(len(term)) * min(count, 3)
-                raw_energy[idx] += weight
+                distinct_count += 1
+                base_w = term_weights.get(term) if term_weights else None
+                if base_w is None:
+                    base_w = math.log1p(len(term))
+                line_weight_sum += base_w * min(count, 3)
 
-    # 3. 高斯滑动窗口连续波函数平滑
+        if distinct_count > 0:
+            line_hit_distinct[idx] = distinct_count
+            # 多词共同命中赋予协同加权
+            co_occur_boost = 1.0 + 0.3 * (distinct_count - 1)
+            raw_energy[idx] = line_weight_sum * co_occur_boost
+
+    # 3. 高斯加权平滑滤波
     smoothed_energy = [0.0] * num_lines
     for idx in range(num_lines):
         if raw_energy[idx] == 0:
-            # 局部有能量才展开扩散
             has_local = any(
                 raw_energy[k] > 0
                 for k in range(max(0, idx - window_radius), min(num_lines, idx + window_radius + 1))
@@ -115,22 +169,21 @@ def extract_evidence_spans(
                 total_weight += kernel
         smoothed_energy[idx] = acc_energy / max(total_weight, 1e-6)
 
-    # 4. 寻找局部波峰极大值点与连通证据区间
+    # 4. 寻找局部波峰
     peaks: list[tuple[float, int]] = []
-    threshold = 0.15 * max(smoothed_energy) if max(smoothed_energy) > 0 else 0.0
+    max_energy = max(smoothed_energy) if smoothed_energy else 0.0
+    threshold = 0.15 * max_energy if max_energy > 0 else 0.0
     if threshold <= 0:
         return []
 
     for idx in range(num_lines):
         val = smoothed_energy[idx]
         if val > threshold:
-            # 是否局部波峰
             left = smoothed_energy[idx - 1] if idx > 0 else 0
             right = smoothed_energy[idx + 1] if idx + 1 < num_lines else 0
             if val >= left and val >= right:
                 peaks.append((val, idx))
 
-    # 按波峰能量降序排列
     peaks.sort(key=lambda p: p[0], reverse=True)
 
     spans: list[EvidenceSpan] = []
@@ -140,22 +193,54 @@ def extract_evidence_spans(
         if center_line in covered_lines:
             continue
 
-        # 向两侧动态延伸证据区间，直到能量跌落至谷底或遇到自然段落空行
+        # 向两侧自适应延伸证据区间
         start_l = center_line
-        while start_l > 0 and smoothed_energy[start_l - 1] > threshold * 0.4:
-            start_l -= 1
-            if lines[start_l].strip() == "":
+        blank_run = 0
+        while start_l > 0 and smoothed_energy[start_l - 1] > threshold * 0.35:
+            prev_line = lines[start_l - 1].strip()
+            if _MD_HEADING_RE.match(prev_line):
+                # 遇到上一级标题，将其包含作为本节起点后停止向上延伸
+                start_l -= 1
                 break
+            if prev_line == "":
+                blank_run += 1
+                if blank_run >= 2:
+                    break
+            else:
+                blank_run = 0
+            start_l -= 1
 
         end_l = center_line
-        while end_l < num_lines - 1 and smoothed_energy[end_l + 1] > threshold * 0.4:
-            end_l += 1
-            if lines[end_l].strip() == "":
+        blank_run = 0
+        while end_l < num_lines - 1 and smoothed_energy[end_l + 1] > threshold * 0.35:
+            next_line = lines[end_l + 1].strip()
+            if _MD_HEADING_RE.match(next_line):
+                # 遇到下一个标题，不跨越至下一个独立章节
                 break
+            if next_line == "":
+                blank_run += 1
+                if blank_run >= 2:
+                    break
+            else:
+                blank_run = 0
+            end_l += 1
 
-        # 边界修剪与约束
-        span_range = range(start_l, end_l + 1)
-        for ln in span_range:
+        # 若命中了语法结构块起点（且跨度在 40 行内），向前吸附至符号声明行
+        if line_blocks[center_line]:
+            block_start = line_blocks[center_line][0]
+            if block_start < start_l and (end_l - block_start) <= 40:
+                start_l = block_start
+
+        # 规整：剔除首尾的空白行
+        while start_l <= end_l and lines[start_l].strip() == "":
+            start_l += 1
+        while end_l >= start_l and lines[end_l].strip() == "":
+            end_l -= 1
+        if start_l > end_l:
+            continue
+
+        # 标记已覆盖
+        for ln in range(start_l, end_l + 1):
             covered_lines.add(ln)
 
         span_lines = lines[start_l : end_l + 1]
@@ -163,10 +248,9 @@ def extract_evidence_spans(
         if not span_text:
             continue
 
-        breadcrumb = line_breadcrumbs[center_line] or (line_breadcrumbs[start_l] if start_l < num_lines else "")
-        confidence = min(1.0, peak_energy / (max(smoothed_energy) + 1e-6))
+        breadcrumb = line_breadcrumbs[center_line] or line_breadcrumbs[start_l]
+        confidence = min(1.0, peak_energy / (max_energy + 1e-6))
 
-        # ANSI 高亮
         highlighted = _highlight_terms(span_text, norm_terms)
 
         spans.append(
@@ -183,7 +267,6 @@ def extract_evidence_spans(
         if len(spans) >= max_spans:
             break
 
-    # 按行号自上而下排序
     spans.sort(key=lambda s: s.start_line)
     return spans
 
