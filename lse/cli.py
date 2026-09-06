@@ -23,7 +23,11 @@ def main(argv: list[str] | None = None) -> int:
     if not hasattr(args, "func"):
         parser.print_help()
         return 0
-    return args.func(args)
+    try:
+        return args.func(args)
+    except RuntimeError as e:
+        print(f"❌ {e}", file=sys.stderr)
+        return 1
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -55,6 +59,14 @@ def _build_parser() -> argparse.ArgumentParser:
     search_p.add_argument("-l", "--limit", type=int, default=DEFAULT_SEARCH_LIMIT)
     search_p.add_argument("-f", "--format", choices=["text", "json"], default="text")
     search_p.set_defaults(func=_cmd_search)
+
+    pack_p = sub.add_parser("pack", help="🎯 意图到上下文胶囊：搜索并一键打包自闭合代码块与依赖供 AI 消费")
+    pack_p.add_argument("query", help="查询意图或符号")
+    pack_p.add_argument("-b", "--budget", type=int, default=1500, help="Token 预算（默认: 1500）")
+    pack_p.add_argument("-c", "--copy", action="store_true", help="自动拷贝到系统剪贴板")
+    pack_p.add_argument("-f", "--format", choices=["markdown", "json"], default="markdown", help="输出格式")
+    pack_p.add_argument("--no-deps", action="store_true", help="不提取 1-hop 依赖定义")
+    pack_p.set_defaults(func=_cmd_pack)
 
     status_p = sub.add_parser("status", help="查看索引状态")
     status_p.set_defaults(func=_cmd_status)
@@ -108,6 +120,33 @@ def _cmd_search(args) -> int:
     return 0
 
 
+def _cmd_pack(args) -> int:
+    if len(args.query) > 4096:
+        print("❌ 查询过长", file=sys.stderr)
+        return 1
+    from .packer import ContextPacker
+
+    packer = ContextPacker(args.index_dir)
+    capsule, copied = packer.pack(
+        query=args.query,
+        budget_tokens=max(args.budget, 100),
+        include_deps=not args.no_deps,
+        copy_to_clipboard=args.copy,
+    )
+
+    if args.format == "json":
+        print(capsule.to_json())
+    else:
+        print(capsule.to_markdown())
+
+    if args.copy:
+        if copied:
+            print("\n📋 \033[32m已成功拷贝上下文胶囊到系统剪贴板！可以直接 Cmd+V 粘贴给 AI。\033[0m", file=sys.stderr)
+        else:
+            print("\n⚠️ 未检测到系统剪贴板工具（pbcopy/xclip/wl-copy/clip），未能自动拷贝。", file=sys.stderr)
+    return 0
+
+
 def _cmd_status(args) -> int:
     engine = IndexEngine(args.index_dir)
     _print_status(engine.status())
@@ -118,6 +157,9 @@ def _cmd_rebuild(args) -> int:
     if not args.yes:
         print("⚠️ 这将删除现有索引并重建，请加 --yes 确认")
         return 1
+    import shutil
+
+    shutil.rmtree(args.index_dir, ignore_errors=True)
     engine = IndexEngine(args.index_dir)
     print(f"🔄 重建索引: {args.paths}")
     status = engine.rebuild(args.paths, extra_exclude=getattr(args, "exclude", None))

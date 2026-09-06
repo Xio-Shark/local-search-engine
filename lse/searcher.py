@@ -87,6 +87,26 @@ class SearchEngine:
         else:
             hits = searcher.search(parsed, limit_val)
 
+        # 4. 容错降级：仅对纯文本意图（无字段过滤:、无显式AND、无精确引号）在全词命中为 0 时降级为宽松匹配 (OR)
+        if (
+            hits.count == 0
+            and not sort_field
+            and " AND " not in query
+            and ":" not in query
+            and '"' not in query
+        ):
+            try:
+                parsed_loose = self.index.parse_query(
+                    effective_query,
+                    DEFAULT_SEARCH_FIELDS,
+                    conjunction_by_default=False,
+                )
+                hits_loose = searcher.search(parsed_loose, limit_val)
+                if hits_loose.count > 0:
+                    hits = hits_loose
+            except Exception:
+                pass
+
         results = self._to_hits(searcher, hits, query)
         elapsed_ms = int((datetime.now() - start).total_seconds() * 1000)
         return SearchResult(
