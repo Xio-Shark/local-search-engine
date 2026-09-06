@@ -177,7 +177,14 @@ class ContextPacker:
         dependencies: list[DependencyBlock] = []
         if include_deps and anchors:
             candidate_symbols = self._extract_referenced_symbols(anchors)
-            dependencies = self._resolve_dependencies(candidate_symbols, exclude_paths={a.file_path for a in anchors})
+            exclude_spans: dict[str, list[tuple[int, int]]] = {}
+            for a in anchors:
+                exclude_spans.setdefault(a.file_path, []).append((a.start_line, a.end_line))
+            dependencies = self._resolve_dependencies(
+                candidate_symbols,
+                exclude_spans=exclude_spans,
+                exclude_paths=set(),
+            )
 
         # 3. 在 Token 预算内进行压包裁剪
         anchors, dependencies, est_tokens = self._fit_budget(
@@ -272,45 +279,95 @@ class ContextPacker:
         return valid_symbols
 
     def _resolve_dependencies(
-        self, symbols: set[str], exclude_paths: set[str], max_deps: int = 5
+        self,
+        symbols: set[str],
+        exclude_paths: set[str] | None = None,
+        exclude_spans: dict[str, list[tuple[int, int]]] | None = None,
+        max_deps: int = 5,
     ) -> list[DependencyBlock]:
-        """在仓库现有索引中秒级反查符号定义并提取声明。"""
+        """在仓库现有索引中秒级反查符号定义并提取声明（消除 N+1 查询，单次批量召回）。"""
         if not symbols:
             return []
 
+        exclude_paths = exclude_paths or set()
+        exclude_spans = exclude_spans or {}
         deps: list[DependencyBlock] = []
         seen_syms: set[str] = set()
 
-        # 最多处理前 10 个候选符号，避免开销
-        sorted_syms = sorted(symbols, key=len, reverse=True)[:10]
+        # 最多处理前 10 个候选符号，按符号长度倒序
+        sorted_syms = [s for s in sorted(symbols, key=len, reverse=True) if len(s) >= 3][:10]
+        if not sorted_syms:
+            return []
 
+        # 1. 批量构建 Tantivy 候选文件检索（单趟 OR 召回，替代单词多次独立查询）
+        batch_query = " OR ".join(f'"{s}"' for s in sorted_syms)
+        candidate_files: list[str] = []
+        try:
+            res = self.searcher.search(batch_query, limit=20)
+            for h in res.hits:
+                if h.path not in candidate_files:
+                    candidate_files.append(h.path)
+        except Exception:
+            pass
+
+        # 2. 缓存已读取并解析的文件内容，避免重复读盘
+        file_content_cache: dict[str, str] = {}
+
+        def get_file_content(path: str) -> str:
+            if path not in file_content_cache:
+                file_content_cache[path] = _read_disk_file(path) or ""
+            return file_content_cache[path]
+
+        # 3. 首先在批量召回的文件中匹配符号定义
         for sym in sorted_syms:
-            if sym in seen_syms:
-                continue
+            if sym in seen_syms or len(deps) >= max_deps:
+                break
 
-            # 使用 Tantivy 短语查询精准反查符号
-            query_str = f'"{sym}"'
-            try:
-                res = self.searcher.search(query_str, limit=3)
-            except Exception:
-                continue
-
-            for hit in res.hits:
-                if hit.path in exclude_paths:
+            for file_path in candidate_files:
+                if file_path in exclude_paths:
                     continue
 
-                content = _read_disk_file(hit.path)
-                if not content:
+                content = get_file_content(file_path)
+                if not content or sym not in content:
                     continue
 
-                found = _find_symbol_definition(content, sym, hit.path)
+                found = _find_symbol_definition(content, sym, file_path)
                 if found:
+                    # 检查是否落在已有 Anchor 的排除区间内
+                    spans = exclude_spans.get(file_path, [])
+                    if any(start <= found.line_no <= end for start, end in spans):
+                        continue
+
                     deps.append(found)
                     seen_syms.add(sym)
                     break
 
-            if len(deps) >= max_deps:
-                break
+        # 4. 容错补漏：若仍有符号未找到且依赖数量未满，对未命中符号执行降级精准检索
+        if len(deps) < max_deps:
+            remaining_syms = [s for s in sorted_syms if s not in seen_syms]
+            for sym in remaining_syms:
+                if len(deps) >= max_deps:
+                    break
+                try:
+                    res_single = self.searcher.search(f'"{sym}"', limit=3)
+                except Exception:
+                    continue
+
+                for hit in res_single.hits:
+                    if hit.path in exclude_paths:
+                        continue
+                    content = get_file_content(hit.path)
+                    if not content or sym not in content:
+                        continue
+
+                    found = _find_symbol_definition(content, sym, hit.path)
+                    if found:
+                        spans = exclude_spans.get(hit.path, [])
+                        if any(start <= found.line_no <= end for start, end in spans):
+                            continue
+                        deps.append(found)
+                        seen_syms.add(sym)
+                        break
 
         return deps
 
@@ -372,48 +429,104 @@ class ContextPacker:
 
 
 def _find_symbol_definition(content: str, symbol: str, file_path: str) -> DependencyBlock | None:
-    """从文件源码中定位符号的类/函数/常量定义，并提取简要签名或短实现。"""
+    """从文件源码中定位符号的类/函数/方法/常量定义，并提取简要签名或短实现。"""
     lines = content.splitlines()
     is_py = file_path.endswith(".py")
 
     if is_py:
         try:
             tree = ast.parse(content)
+            target_node = None
+            target_parent = None
+
+            # 1. 优先在顶层语句及顶层类的方法中查找
             for node in tree.body:
                 if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
                     if node.name == symbol:
-                        start_l = node.lineno - 1
-                        end_l = getattr(node, "end_lineno", start_l + 1)
-                        # 如果函数或类很短（<= 18 行），整段包含；否则仅截取签名和 docstring
-                        kind = "class" if isinstance(node, ast.ClassDef) else "def"
-                        if end_l - start_l <= 18:
-                            code_slice = "\n".join(lines[start_l:end_l])
-                        else:
-                            # 提取前 8 行并打断
-                            cut_end = min(start_l + 8, len(lines))
-                            code_slice = "\n".join(lines[start_l:cut_end]) + "\n    # ... [implementation omitted]"
-                        return DependencyBlock(
-                            symbol=symbol,
-                            file_path=file_path,
-                            line_no=node.lineno,
-                            kind=kind,
-                            code=code_slice,
-                        )
+                        target_node = node
+                        break
+                    if isinstance(node, ast.ClassDef):
+                        for sub in node.body:
+                            if isinstance(sub, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                                if sub.name == symbol:
+                                    target_node = sub
+                                    target_parent = node
+                                    break
+                        if target_node:
+                            break
+
+            # 2. 若未命中，通过递归遍历语法树查找所有嵌套定义
+            if not target_node:
+                for parent in ast.walk(tree):
+                    for child in ast.iter_child_nodes(parent):
+                        if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                            if child.name == symbol:
+                                target_node = child
+                                target_parent = parent if isinstance(parent, ast.ClassDef) else None
+                                break
+                    if target_node:
+                        break
+
+            if target_node:
+                start_l = target_node.lineno - 1
+                end_l = getattr(target_node, "end_lineno", len(lines))
+                kind = "class" if isinstance(target_node, ast.ClassDef) else (
+                    "method" if target_parent else "def"
+                )
+                indent_str = " " * getattr(target_node, "col_offset", 0)
+                if end_l - start_l <= 18:
+                    code_slice = "\n".join(lines[start_l:end_l])
+                else:
+                    cut_end = min(start_l + 8, len(lines))
+                    code_slice = "\n".join(lines[start_l:cut_end]) + f"\n{indent_str}    # ... [implementation omitted]"
+                return DependencyBlock(
+                    symbol=symbol,
+                    file_path=file_path,
+                    line_no=target_node.lineno,
+                    kind=kind,
+                    code=code_slice,
+                )
         except SyntaxError:
             pass
 
-    # 正则降级匹配 (支持 Python, Go, Rust, TS/JS, Java 等)
+    # 正则降级匹配 (支持 Python, Go, Rust, TS/JS, Java, C/C++ 等)
     pattern = re.compile(
-        rf"^\s*(?:(?:export|pub|public|private|async|const|final)\s+)*"
-        rf"(class|def|fn|func|function|interface|type|struct)\s+{re.escape(symbol)}\b",
+        rf"^\s*(?:(?:export|pub|public|private|protected|async|static|const|final)\s+)*"
+        rf"(class|def|fn|func|function|interface|type|struct|trait|enum)\s+{re.escape(symbol)}\b",
         re.MULTILINE,
     )
     for idx, line in enumerate(lines):
         m = pattern.search(line)
         if m:
             kind = m.group(1)
-            # 取后 6 行作为签名展示
-            snippet = "\n".join(lines[idx : min(idx + 6, len(lines))])
+            # 智能闭合探测：支持大括号或缩进语法闭包
+            def_indent = len(line) - len(line.lstrip())
+            brace_count = line.count("{") - line.count("}")
+            end_idx = idx
+            if "{" in line:
+                for j in range(idx + 1, min(idx + 50, len(lines))):
+                    brace_count += lines[j].count("{") - lines[j].count("}")
+                    end_idx = j
+                    if brace_count <= 0:
+                        break
+            else:
+                for j in range(idx + 1, min(idx + 50, len(lines))):
+                    cur_line = lines[j]
+                    if not cur_line.strip():
+                        end_idx = j
+                        continue
+                    cur_indent = len(cur_line) - len(cur_line.lstrip())
+                    if cur_indent <= def_indent and not cur_line.strip().startswith(("#", "//")):
+                        break
+                    end_idx = j
+
+            span_len = end_idx - idx + 1
+            if span_len <= 18:
+                snippet = "\n".join(lines[idx : end_idx + 1])
+            else:
+                cut_end = min(idx + 8, len(lines))
+                snippet = "\n".join(lines[idx:cut_end]) + "\n    // ... [implementation omitted]"
+
             return DependencyBlock(
                 symbol=symbol,
                 file_path=file_path,

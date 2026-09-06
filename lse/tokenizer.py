@@ -105,13 +105,16 @@ def tokenize_cjk_run(cjk_text: str) -> list[str]:
         if clean_cjk and clean_cjk != cjk_text and len(clean_cjk) >= 2:
             tokens.append(clean_cjk)
 
-    # 3. 连续 2-gram
-    for i in range(length - 1):
-        tokens.append(cjk_text[i : i + 2])
+    # 3. 连续 2-gram (仅对短文本或未收录词补充)
+    if jieba is None or length <= 4:
+        for i in range(length - 1):
+            tokens.append(cjk_text[i : i + 2])
 
-    # 4. 单字（供单汉字检索命中）
+    # 4. 单字（供单字精确检索，过滤纯虚词/助词停用字符以保护 BM25 长度归一化）
+    _STOP_CHARS = frozenset("的在和是与及于了或着把被由从呢吧啊么这那")
     for ch in cjk_text:
-        tokens.append(ch)
+        if ch not in _STOP_CHARS:
+            tokens.append(ch)
 
     # 保持顺序去重
     seen = set()
