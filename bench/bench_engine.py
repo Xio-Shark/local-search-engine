@@ -10,8 +10,6 @@
 
 from __future__ import annotations
 
-import os
-import shutil
 import tempfile
 import time
 from pathlib import Path
@@ -168,7 +166,7 @@ def run_benchmark():
         for _ in range(20):
             for q in test_queries:
                 tq0 = time.perf_counter()
-                res = searcher.search(q, limit=10)
+                _ = searcher.search(q, limit=10)
                 latencies.append((time.perf_counter() - tq0) * 1000)
 
         latencies.sort()

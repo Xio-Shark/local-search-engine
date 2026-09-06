@@ -9,6 +9,12 @@ dependencies = [
     "jieba>=0.42.1",
 ]
 
+[project.optional-dependencies]
+watch = [
+    "watchfiles>=1.0.0",
+]
+
+
 [project.scripts]
 lse = "lse.cli:main"
 

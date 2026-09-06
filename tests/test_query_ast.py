@@ -18,7 +18,7 @@ def test_query_ast_lexer_and_compiler():
     compiled2, _, _ = compiler2.compile()
     assert '("分布式系统"^5 OR' in compiled2
     assert "分布式" in compiled2
-    assert "布式" in compiled2
+    assert "系统" in compiled2
 
     # 3. 容错未闭合引号
     compiler3 = QueryCompiler('"未闭合短语')

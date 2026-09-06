@@ -182,6 +182,7 @@ class ContextPacker:
                 exclude_spans.setdefault(a.file_path, []).append((a.start_line, a.end_line))
             dependencies = self._resolve_dependencies(
                 candidate_symbols,
+                anchors=anchors,
                 exclude_spans=exclude_spans,
                 exclude_paths=set(),
             )
@@ -281,11 +282,17 @@ class ContextPacker:
     def _resolve_dependencies(
         self,
         symbols: set[str],
+        anchors: list[AnchorBlock] | None = None,
         exclude_paths: set[str] | None = None,
         exclude_spans: dict[str, list[tuple[int, int]]] | None = None,
         max_deps: int = 5,
     ) -> list[DependencyBlock]:
-        """在仓库现有索引中秒级反查符号定义并提取声明（消除 N+1 查询，单次批量召回）。"""
+        """按优先级解析依赖符号定义：
+        Phase 1: 静态导入直达 (从锚点文件的 import 语句中精确提取依赖目标)
+        Phase 2: 同文件就地定义解析 (Intra-file Definition outside anchor spans)
+        Phase 3: 全局 Tantivy 批量检索引擎兜底
+        Phase 4: 极少数冷僻符号单次点查容错补漏
+        """
         if not symbols:
             return []
 
@@ -293,24 +300,14 @@ class ContextPacker:
         exclude_spans = exclude_spans or {}
         deps: list[DependencyBlock] = []
         seen_syms: set[str] = set()
+        seen_defs: set[tuple[str, int]] = set()
 
         # 最多处理前 10 个候选符号，按符号长度倒序
         sorted_syms = [s for s in sorted(symbols, key=len, reverse=True) if len(s) >= 3][:10]
         if not sorted_syms:
             return []
 
-        # 1. 批量构建 Tantivy 候选文件检索（单趟 OR 召回，替代单词多次独立查询）
-        batch_query = " OR ".join(f'"{s}"' for s in sorted_syms)
-        candidate_files: list[str] = []
-        try:
-            res = self.searcher.search(batch_query, limit=20)
-            for h in res.hits:
-                if h.path not in candidate_files:
-                    candidate_files.append(h.path)
-        except Exception:
-            pass
-
-        # 2. 缓存已读取并解析的文件内容，避免重复读盘
+        # 缓存已读取并解析的文件内容，避免重复读盘
         file_content_cache: dict[str, str] = {}
 
         def get_file_content(path: str) -> str:
@@ -318,58 +315,120 @@ class ContextPacker:
                 file_content_cache[path] = _read_disk_file(path) or ""
             return file_content_cache[path]
 
-        # 3. 首先在批量召回的文件中匹配符号定义
-        for sym in sorted_syms:
-            if sym in seen_syms or len(deps) >= max_deps:
-                break
+        def try_add_dep(found: DependencyBlock | None, sym: str) -> bool:
+            if not found:
+                return False
+            spans = exclude_spans.get(found.file_path, [])
+            if any(start <= found.line_no <= end for start, end in spans):
+                return False
+            key = (found.file_path, found.line_no)
+            if key in seen_defs:
+                seen_syms.add(sym)
+                return True
+            seen_defs.add(key)
+            seen_syms.add(sym)
+            deps.append(found)
+            return True
 
-            for file_path in candidate_files:
-                if file_path in exclude_paths:
-                    continue
-
-                content = get_file_content(file_path)
-                if not content or sym not in content:
-                    continue
-
-                found = _find_symbol_definition(content, sym, file_path)
-                if found:
-                    # 检查是否落在已有 Anchor 的排除区间内
-                    spans = exclude_spans.get(file_path, [])
-                    if any(start <= found.line_no <= end for start, end in spans):
-                        continue
-
-                    deps.append(found)
-                    seen_syms.add(sym)
+        # Phase 1: 静态导入直达 (JIT Static Import Resolution)
+        if anchors:
+            for anchor in anchors:
+                if len(deps) >= max_deps:
                     break
+                anchor_content = get_file_content(anchor.file_path)
+                if not anchor_content:
+                    continue
+                sym_to_file, imported_files = _resolve_file_imports(anchor.file_path, anchor_content)
 
-        # 4. 容错补漏：若仍有符号未找到且依赖数量未满，对未命中符号执行降级精准检索
+                # 1. 精确导入符号直达
+                for sym in sorted_syms:
+                    if sym in seen_syms or len(deps) >= max_deps:
+                        continue
+                    if sym in sym_to_file:
+                        target_file = sym_to_file[sym]
+                        if target_file in exclude_paths:
+                            continue
+                        target_content = get_file_content(target_file)
+                        found = _find_symbol_definition(target_content, sym, target_file)
+                        try_add_dep(found, sym)
+
+                # 2. 导入模块内部符号/方法推导 (如通过 Class 实例调用的成员方法)
+                for sym in sorted_syms:
+                    if sym in seen_syms or len(deps) >= max_deps:
+                        continue
+                    for imp_file in imported_files:
+                        if imp_file in exclude_paths:
+                            continue
+                        imp_content = get_file_content(imp_file)
+                        if sym not in imp_content:
+                            continue
+                        found = _find_symbol_definition(imp_content, sym, imp_file)
+                        if try_add_dep(found, sym):
+                            break
+
+        # Phase 2: 同文件就地定义解析 (Intra-file Definition outside anchor spans)
+        if anchors and len(deps) < max_deps:
+            for anchor in anchors:
+                if anchor.file_path in exclude_paths or len(deps) >= max_deps:
+                    continue
+                anchor_content = get_file_content(anchor.file_path)
+                for sym in sorted_syms:
+                    if sym in seen_syms or len(deps) >= max_deps:
+                        continue
+                    if sym not in anchor_content:
+                        continue
+                    found = _find_symbol_definition(anchor_content, sym, anchor.file_path)
+                    try_add_dep(found, sym)
+
+        # Phase 3: 全局 Tantivy 批量检索引擎兜底
         if len(deps) < max_deps:
             remaining_syms = [s for s in sorted_syms if s not in seen_syms]
-            for sym in remaining_syms:
+            if remaining_syms:
+                batch_query = " OR ".join(f'"{s}"' for s in remaining_syms)
+                candidate_files: list[str] = []
+                try:
+                    res = self.searcher.search(batch_query, limit=20)
+                    for h in res.hits:
+                        if h.path not in candidate_files:
+                            candidate_files.append(h.path)
+                except Exception:
+                    pass
+
+                for sym in remaining_syms:
+                    if sym in seen_syms or len(deps) >= max_deps:
+                        break
+                    for file_path in candidate_files:
+                        if file_path in exclude_paths:
+                            continue
+                        content = get_file_content(file_path)
+                        if not content or sym not in content:
+                            continue
+                        found = _find_symbol_definition(content, sym, file_path)
+                        if try_add_dep(found, sym):
+                            break
+
+        # Phase 4: 极少数冷僻符号单次点查容错补漏
+        if len(deps) < max_deps:
+            final_syms = [s for s in sorted_syms if s not in seen_syms]
+            for sym in final_syms:
                 if len(deps) >= max_deps:
                     break
                 try:
                     res_single = self.searcher.search(f'"{sym}"', limit=3)
                 except Exception:
                     continue
-
                 for hit in res_single.hits:
                     if hit.path in exclude_paths:
                         continue
                     content = get_file_content(hit.path)
                     if not content or sym not in content:
                         continue
-
                     found = _find_symbol_definition(content, sym, hit.path)
-                    if found:
-                        spans = exclude_spans.get(hit.path, [])
-                        if any(start <= found.line_no <= end for start, end in spans):
-                            continue
-                        deps.append(found)
-                        seen_syms.add(sym)
+                    if try_add_dep(found, sym):
                         break
 
         return deps
+
 
     def _fit_budget(
         self,
@@ -426,6 +485,143 @@ class ContextPacker:
         )
         total_tokens = estimate_tokens(dummy_capsule.to_markdown())
         return accepted_anchors, accepted_deps, total_tokens
+
+
+def _resolve_file_imports(file_path: str, content: str) -> tuple[dict[str, str], list[str]]:
+    """解析源文件中的 import 依赖关系（支持 Python AST 与 JS/TS 正则）。
+
+    返回：
+    - symbol_to_file: {imported_symbol: target_file_path}
+    - imported_files: [target_file_path, ...]
+    """
+    symbol_to_file: dict[str, str] = {}
+    imported_files: list[str] = []
+
+    try:
+        cur_path = Path(file_path).resolve()
+        cur_dir = cur_path.parent
+    except Exception:
+        return symbol_to_file, imported_files
+
+    # 向上寻找可能的项目根目录（最多 5 层）
+    candidate_roots = [cur_dir]
+    p = cur_dir
+    for _ in range(5):
+        p = p.parent
+        if p == p.parent:
+            break
+        candidate_roots.append(p)
+
+    # 1. Python 文件处理
+    if file_path.endswith(".py"):
+        try:
+            tree = ast.parse(content)
+        except SyntaxError:
+            return symbol_to_file, imported_files
+
+        def _find_py_module(module_name: str | None, level: int) -> Path | None:
+            if level > 0:
+                base = cur_dir
+                for _ in range(level - 1):
+                    base = base.parent
+                if module_name:
+                    target = base.joinpath(*module_name.split("."))
+                else:
+                    target = base
+                for ext in [".py", ".pyi"]:
+                    f = target.with_suffix(ext)
+                    if f.is_file():
+                        return f
+                init_f = target / "__init__.py"
+                if init_f.is_file():
+                    return init_f
+                return None
+            else:
+                if not module_name:
+                    return None
+                parts = module_name.split(".")
+                for root in candidate_roots:
+                    target = root.joinpath(*parts)
+                    for ext in [".py", ".pyi"]:
+                        f = target.with_suffix(ext)
+                        if f.is_file():
+                            return f
+                    init_f = target / "__init__.py"
+                    if init_f.is_file():
+                        return init_f
+                return None
+
+        for node in tree.body:
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    mod_f = _find_py_module(alias.name, level=0)
+                    if mod_f:
+                        mod_str = str(mod_f)
+                        name = alias.asname or alias.name.split(".")[-1]
+                        symbol_to_file[name] = mod_str
+                        if mod_str not in imported_files:
+                            imported_files.append(mod_str)
+            elif isinstance(node, ast.ImportFrom):
+                mod_f = _find_py_module(node.module, level=node.level)
+                if mod_f:
+                    mod_str = str(mod_f)
+                    if mod_str not in imported_files:
+                        imported_files.append(mod_str)
+                    for alias in node.names:
+                        name = alias.asname or alias.name
+                        symbol_to_file[name] = mod_str
+                elif node.module is None and node.level > 0:
+                    for alias in node.names:
+                        sub_f = _find_py_module(alias.name, level=node.level)
+                        if sub_f:
+                            sub_str = str(sub_f)
+                            name = alias.asname or alias.name
+                            symbol_to_file[name] = sub_str
+                            if sub_str not in imported_files:
+                                imported_files.append(sub_str)
+
+        return symbol_to_file, imported_files
+
+    # 2. JavaScript / TypeScript 文件处理
+    if any(file_path.endswith(ext) for ext in [".js", ".jsx", ".ts", ".tsx", ".mjs"]):
+        js_import_pattern = re.compile(
+            r"""import\s+(?:(?:\*\s+as\s+(\w+))|(?:\{([^}]+)\})|(\w+))\s+from\s+['"]([^'"]+)['"]"""
+        )
+        for m in js_import_pattern.finditer(content):
+            star_alias, bracket_items, default_alias, mod_rel = m.groups()
+            if mod_rel.startswith("."):
+                target = (cur_dir / mod_rel).resolve()
+                target_f = None
+                for ext in [".ts", ".tsx", ".js", ".jsx"]:
+                    cand = target.with_suffix(ext)
+                    if cand.is_file():
+                        target_f = cand
+                        break
+                if not target_f and target.is_dir():
+                    for index_name in ["index.ts", "index.tsx", "index.js", "index.jsx"]:
+                        cand = target / index_name
+                        if cand.is_file():
+                            target_f = cand
+                            break
+                if target_f:
+                    target_str = str(target_f)
+                    if target_str not in imported_files:
+                        imported_files.append(target_str)
+                    if star_alias:
+                        symbol_to_file[star_alias] = target_str
+                    if default_alias:
+                        symbol_to_file[default_alias] = target_str
+                    if bracket_items:
+                        for item in bracket_items.split(","):
+                            parts = item.strip().split()
+                            if len(parts) == 3 and parts[1] == "as":
+                                symbol_to_file[parts[2]] = target_str
+                            elif parts:
+                                symbol_to_file[parts[0]] = target_str
+
+        return symbol_to_file, imported_files
+
+    return symbol_to_file, imported_files
 
 
 def _find_symbol_definition(content: str, symbol: str, file_path: str) -> DependencyBlock | None:

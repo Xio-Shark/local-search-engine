@@ -77,6 +77,12 @@ def _build_parser() -> argparse.ArgumentParser:
     _add_common_index_args(rebuild_p)
     rebuild_p.set_defaults(func=_cmd_rebuild)
 
+    watch_p = sub.add_parser("watch", help="实时监听文件系统变动并自动增量更新索引")
+    watch_p.add_argument("paths", nargs="*", type=Path, help="要监听的目录（默认沿用上次）")
+    watch_p.add_argument("--debounce", type=float, default=1.0, help="防抖延迟秒数（默认: 1.0s）")
+    _add_common_index_args(watch_p)
+    watch_p.set_defaults(func=_cmd_watch)
+
     return parser
 
 
@@ -165,6 +171,59 @@ def _cmd_rebuild(args) -> int:
     status = engine.rebuild(args.paths, extra_exclude=getattr(args, "exclude", None))
     _print_status(status)
     return 0
+
+
+def _cmd_watch(args) -> int:
+    engine = IndexEngine(args.index_dir)
+    roots = args.paths or _last_indexed_roots(args.index_dir)
+    if not roots:
+        print("⚠️ 未提供路径且无上次索引记录，请指定目录", file=sys.stderr)
+        return 1
+
+    resolved_roots = [p.resolve() for p in roots if p.exists()]
+    if not resolved_roots:
+        print("❌ 监听路径均不存在", file=sys.stderr)
+        return 1
+
+    print(f"👀 开始实时监听目录变动: {[str(r) for r in resolved_roots]}")
+    print("   (按 Ctrl+C 停止监听)")
+
+    extra_exclude = getattr(args, "exclude", None)
+
+    try:
+        import watchfiles
+        from watchfiles import Change, DefaultFilter
+
+        exclude_dirs = set(extra_exclude or [])
+        exclude_dirs.update({".git", ".lse", "node_modules", "__pycache__", ".venv", ".pytest_cache"})
+
+        class CustomFilter(DefaultFilter):
+            def __call__(self, change: Change, path: str) -> bool:
+                p = Path(path)
+                if any(part in exclude_dirs for part in p.parts):
+                    return False
+                return super().__call__(change, path)
+
+        for changes in watchfiles.watch(
+            *resolved_roots,
+            watch_filter=CustomFilter(),
+            debounce=int(getattr(args, "debounce", 1.0) * 1000),
+            step=50,
+        ):
+            print(f"\n⚡ 检测到 {len(changes)} 处文件变动，正在同步增量索引...")
+            status = engine.update(resolved_roots, extra_exclude=extra_exclude)
+            print(f"   已更新: {status.doc_count} 篇文档 ({status.index_bytes / 1024:.1f} KB)")
+    except ImportError:
+        import time
+        print("ℹ️ 未检测到 watchfiles，使用轻量轮询监听模式 (每 2 秒一次)...")
+        while True:
+            time.sleep(max(getattr(args, "debounce", 2.0), 1.0))
+            engine.update(resolved_roots, extra_exclude=extra_exclude)
+    except KeyboardInterrupt:
+        print("\n🛑 已停止监听。")
+        return 0
+    return 0
+
 
 
 def _collect_count(engine: IndexEngine, paths: list[Path], extra_exclude: list[str] | None = None) -> int:

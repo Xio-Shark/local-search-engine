@@ -157,3 +157,71 @@ def test_clipboard_fallback():
     # 测试在无 GUI/无终端剪贴板下的安全无崩溃降级
     res = copy_text_to_clipboard("test snippet")
     assert isinstance(res, bool)
+
+
+def test_resolve_file_imports(tmp_path: Path):
+    from lse.packer import _resolve_file_imports
+
+    pkg_dir = tmp_path / "my_pkg"
+    pkg_dir.mkdir()
+    sub_dir = pkg_dir / "sub"
+    sub_dir.mkdir()
+
+    (sub_dir / "helper.py").write_text("def helper_fn(): pass\n", encoding="utf-8")
+    main_py = sub_dir / "main.py"
+    main_content = """
+from .helper import helper_fn
+from .helper import helper_fn as my_alias
+"""
+    main_py.write_text(main_content, encoding="utf-8")
+
+    sym_to_file, files = _resolve_file_imports(str(main_py), main_content)
+    assert "helper_fn" in sym_to_file
+    assert "my_alias" in sym_to_file
+    assert str(sub_dir / "helper.py") in sym_to_file.values()
+    assert str(sub_dir / "helper.py") in files
+
+    # JS/TS 导入测试
+    ts_main = sub_dir / "app.ts"
+    (sub_dir / "util.ts").write_text("export const utilFn = () => {};\n", encoding="utf-8")
+    ts_content = """
+import { utilFn } from './util';
+import defaultFn from './util';
+"""
+    ts_syms, ts_files = _resolve_file_imports(str(ts_main), ts_content)
+    assert "utilFn" in ts_syms
+    assert "defaultFn" in ts_syms
+    assert str(sub_dir / "util.ts") in ts_files
+
+
+def test_pack_intra_file_dependencies(tmp_path: Path):
+    """测试当被引用的辅助函数在同一文件锚点区间外部时，能作为 Intra-file 依赖吸附。"""
+    repo = tmp_path / "repo_intra"
+    repo.mkdir()
+
+    content = '''"""单文件模块包含核心逻辑与底层辅助函数。"""
+
+def _internal_helper_calc(x: int) -> int:
+    """底层辅助数学计算。"""
+    return x * 42 + 7
+
+def main_public_endpoint(req_id: int) -> int:
+    """业务主入口，调用内部辅助函数。"""
+    val = _internal_helper_calc(req_id)
+    return val
+'''
+    (repo / "service.py").write_text(content, encoding="utf-8")
+
+    idx_dir = tmp_path / "index_intra"
+    engine = IndexEngine(idx_dir)
+    engine.build([repo])
+
+    packer = ContextPacker(idx_dir)
+    capsule, _ = packer.pack("main_public_endpoint 业务主入口", budget_tokens=1000)
+
+    assert len(capsule.anchors) >= 1
+    assert "main_public_endpoint" in capsule.anchors[0].code
+
+    dep_symbols = {d.symbol for d in capsule.dependencies}
+    assert "_internal_helper_calc" in dep_symbols
+

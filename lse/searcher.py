@@ -10,9 +10,13 @@
 from __future__ import annotations
 
 import math
+import mmap
+import os
 import re
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 
 from .config import (
@@ -117,16 +121,20 @@ class SearchEngine:
         )
 
     def _to_hits(self, searcher, search_result, query: str) -> list[SearchHit]:
-        hits: list[SearchHit] = []
         terms = _query_terms(query)
         term_weights = {t: math.log1p(len(t)) for t in terms}
 
-        for score, address in search_result.hits:
+        raw_items = list(search_result.hits)
+        if not raw_items:
+            return []
+
+        def _process_one(item: tuple[float, Any]) -> SearchHit | None:
+            score, address = item
             doc = searcher.doc(address)
             try:
                 path = doc.get_first("path")
             except (AttributeError, TypeError):
-                continue
+                return None
             path_str = str(path)
             content = _read_disk_file(path_str)
             mtime = _parse_mtime(doc.get_first("mtime"))
@@ -135,27 +143,37 @@ class SearchEngine:
             except (TypeError, ValueError):
                 score_val = 0.0
 
-            # 求解连续局部共振证据区间（IDF 加权 + 符号感知）
+            # 求解连续局部证据区间（IDF 加权 + 符号语法感知）
             spans = extract_evidence_spans(content, terms, term_weights=term_weights)
             if spans:
                 snippets = [s.text for s in spans]
             else:
                 snippets = self._fallback_snippets(content, query)
 
-            hits.append(
-                SearchHit(
-                    path=path_str,
-                    filename=Path(path_str).name,
-                    extension=doc.get_first("extension") or "",
-                    doc_type=doc.get_first("doc_type") or "",
-                    size=doc.get_first("size") or 0,
-                    mtime=mtime,
-                    score=score_val,
-                    snippets=snippets,
-                    spans=spans,
-                )
+            return SearchHit(
+                path=path_str,
+                filename=Path(path_str).name,
+                extension=doc.get_first("extension") or "",
+                doc_type=doc.get_first("doc_type") or "",
+                size=doc.get_first("size") or 0,
+                mtime=mtime,
+                score=score_val,
+                snippets=snippets,
+                spans=spans,
             )
-        return hits
+
+        # 针对多文件命中并发读取与切片（避免顺序磁盘 IO 阻塞）
+        if len(raw_items) > 4:
+            with ThreadPoolExecutor(max_workers=min(8, os.cpu_count() or 4)) as executor:
+                res_hits = list(executor.map(_process_one, raw_items))
+            return [h for h in res_hits if h is not None]
+        else:
+            hits = []
+            for item in raw_items:
+                h = _process_one(item)
+                if h is not None:
+                    hits.append(h)
+            return hits
 
     def _fallback_snippets(self, content: str, query: str) -> list[str]:
         """后备摘要提取（当波函数未能提取有效证据跨度时兜底）。"""
@@ -206,11 +224,25 @@ class SearchEngine:
 
 
 def _read_disk_file(path_str: str) -> str:
-    """零存储架构：从本地磁盘直接读取文档全文。"""
+    """按需读取文档原文：对较大文件采用 mmap 内存映射读取，避免常规堆内存缓冲往返。"""
     try:
         p = Path(path_str)
-        if not p.exists():
+        if not p.is_file():
             return ""
+        size = p.stat().st_size
+        if size == 0:
+            return ""
+        if size >= 16384:
+            try:
+                with open(p, "rb") as f:
+                    with mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as mm:
+                        data = mm.read()
+                        try:
+                            return data.decode("utf-8")
+                        except UnicodeDecodeError:
+                            return data.decode("gbk", errors="replace")
+            except OSError:
+                pass
         try:
             return p.read_text(encoding="utf-8")
         except UnicodeDecodeError:

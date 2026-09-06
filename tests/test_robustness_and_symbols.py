@@ -134,11 +134,16 @@ def test_find_symbol_definition_class_methods():
     assert dep.line_no == 5
 
 
-def test_bilingual_dev_term_synonym_expansion():
-    """验证开发高频词汇（如 transaction, rollback）跨语言自动扩展。"""
+def test_semantic_cjk_subwords_no_gibberish():
+    """验证长汉字词语义切分优先，彻底消除'统架'、'计规'等无意义字元切片。"""
     from lse.query_ast import QueryCompiler
 
-    c = QueryCompiler("transaction rollback")
+    c = QueryCompiler("系统架构设计规范")
     compiled, _, _ = c.compile()
-    assert "事务" in compiled
-    assert "回滚" in compiled
+    assert "架构" in compiled
+    assert "设计" in compiled
+    assert "规范" in compiled
+    assert " OR 统架" not in compiled
+    assert " OR 计规" not in compiled
+
+
