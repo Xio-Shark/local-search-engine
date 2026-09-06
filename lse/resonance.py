@@ -300,7 +300,32 @@ def extract_evidence_spans(
             break
 
     spans.sort(key=lambda s: s.start_line)
-    return spans
+
+    # 智能合并同一文件内紧邻的碎片证据段（消除类/函数内仅有 2~5 行空隙导致的上下文割裂）
+    merged_spans: list[EvidenceSpan] = []
+    for s in spans:
+        if not merged_spans:
+            merged_spans.append(s)
+            continue
+        prev = merged_spans[-1]
+        # 若两段重叠或间隔 <= 6 行，且融合后总行数不超过 50 行，融合为自闭合完整证据段
+        if s.start_line <= prev.end_line + 6 and (max(s.end_line, prev.end_line) - prev.start_line + 1) <= 50:
+            new_end = max(s.end_line, prev.end_line)
+            combined_lines = lines[prev.start_line - 1 : new_end]
+            combined_text = "\n".join(combined_lines).strip()
+            bc = prev.breadcrumbs if len(prev.breadcrumbs) >= len(s.breadcrumbs) else s.breadcrumbs
+            merged_spans[-1] = EvidenceSpan(
+                start_line=prev.start_line,
+                end_line=new_end,
+                breadcrumbs=bc,
+                confidence=max(prev.confidence, s.confidence),
+                text=combined_text,
+                highlighted_text=_highlight_terms(combined_text, norm_terms),
+            )
+        else:
+            merged_spans.append(s)
+
+    return merged_spans[:max_spans]
 
 
 def _highlight_terms(text: str, terms: list[str]) -> str:

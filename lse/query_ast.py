@@ -47,6 +47,66 @@ FIELD_ALIASES: dict[str, str] = {
     "content": "content",
 }
 
+# 双向技术概念投影表（弥补纯 BM25 面对自然语言与纯代码库的词汇鸿沟）
+TECHNICAL_CONCEPT_MAP: dict[str, list[str]] = {
+    # 鉴权 / 认证 / 权限 / 令牌
+    "鉴权": ["authenticate", "auth", "authenticator", "authorization", "jwt", "bearer", "token"],
+    "认证": ["authenticate", "auth", "authenticator", "authorization", "jwt", "token"],
+    "身份验证": ["authenticate", "auth", "credentials", "jwt", "token"],
+    "授权": ["authorize", "authorization", "permission", "rbac", "scope", "token"],
+    "令牌": ["token", "jwt", "bearer", "payload", "claims"],
+    # 限流 / 频控 / 流量控制
+    "限流": ["ratelimit", "rate_limit", "limiter", "token_bucket", "leaky_bucket", "sliding_window", "throttle"],
+    "频控": ["ratelimit", "rate_limit", "limiter", "throttle", "frequency"],
+    "防刷": ["ratelimit", "rate_limit", "throttle", "captcha"],
+    # 缓存 / 淘汰 / 穿透
+    "缓存": ["cache", "lru", "lru_cache", "redis", "memcached", "ttl"],
+    "淘汰": ["evict", "eviction", "invalidate", "lru", "ttl"],
+    "失效": ["invalidate", "expire", "expiration", "ttl"],
+    # 数据库 / 事务 / 连接池
+    "数据库": ["db", "database", "sql", "postgres", "mysql", "sqlite", "orm", "repository"],
+    "连接池": ["connection_pool", "pool", "conn_pool", "connection", "acquire_connection"],
+    "事务": ["transaction", "tx", "commit", "rollback", "contextmanager"],
+    "回滚": ["rollback", "abort", "revert"],
+    "提交": ["commit", "flush", "persist"],
+    # 网络 / 路由 / 控制器 / 中间件
+    "中间件": ["middleware", "interceptor", "filter", "pipeline"],
+    "拦截器": ["interceptor", "middleware", "filter"],
+    "路由": ["router", "route", "routing", "endpoint", "dispatch"],
+    "控制器": ["controller", "handler", "service", "action"],
+    "接口": ["api", "interface", "endpoint", "controller", "handler"],
+    # 序列化 / 编码 / 解码
+    "序列化": ["serialize", "serializer", "encode", "encoder", "json", "dumps", "marshal"],
+    "反序列化": ["deserialize", "decode", "decoder", "loads", "unmarshal", "parse"],
+    "解码": ["decode", "decoder", "deserialize", "unmarshal"],
+    "编码": ["encode", "encoder", "serialize", "charset"],
+    # 配置 / 环境变量
+    "配置": ["config", "configuration", "settings", "options", "preferences"],
+    "环境变量": ["environ", "env", "environment", "dotenv"],
+    # 重试 / 超时 / 异常 / 熔断
+    "重试": ["retry", "backoff", "attempt", "reconnect"],
+    "超时": ["timeout", "deadline", "timed_out"],
+    "熔断": ["circuit_breaker", "breaker", "fallback"],
+    "异常": ["exception", "error", "fault", "raise", "catch"],
+    # 英文核心技术词映射到代码别名与中文（支持自然语言英文查询命中中文文档与符号缩写）
+    "authenticate": ["auth", "authenticator", "jwt", "鉴权", "认证"],
+    "authenticator": ["authenticate", "auth", "jwt", "鉴权"],
+    "auth": ["authenticate", "authenticator", "jwt", "bearer", "鉴权", "认证"],
+    "jwt": ["token", "payload", "decode_token", "sign_token", "令牌"],
+    "limiter": ["rate_limit", "token_bucket", "ratelimit", "限流"],
+    "ratelimit": ["rate_limit", "limiter", "token_bucket", "限流"],
+    "pool": ["connection_pool", "acquire_connection", "连接池"],
+    "transaction": ["rollback", "commit", "tx", "事务"],
+    "rollback": ["revert", "abort", "回滚"],
+    "commit": ["提交", "persist", "flush"],
+    "contextmanager": ["__enter__", "__exit__", "scope", "context", "上下文管理器"],
+    "database": ["db", "sql", "数据库"],
+    "cache": ["lru", "eviction", "invalidate", "缓存"],
+    "invalidate": ["evict", "expire", "失效", "淘汰"],
+    "serializer": ["serialize", "json", "marshal", "序列化"],
+    "config": ["settings", "env", "environ", "配置"],
+}
+
 
 def parse_bytes(val: str) -> int:
     """解析带单位的大小字符串为字节数。"""
@@ -255,18 +315,16 @@ class QueryCompiler:
         return f"{target_field}:{val}"
 
     def _compile_term(self, term: str) -> str:
-        """对普通词项进行自适应语义加权展开。
+        """对普通词项进行自适应语义加权展开与双向技术概念投影。
 
         若为连续汉字（>=2个字），生成带短语高权重和双字召回的括号表达式：
         ("本地搜索引擎"^5 OR (本地 OR 地搜 OR 搜索 OR 索引 OR 引擎))
+        若匹配技术领域概念，则自适应吸附中英双向映射词项（^0.8加权）。
         """
-        # 汉字连续词
-        if re.fullmatch(r"[\u4e00-\u9fff]{2,}", term):
-            if len(term) == 2:
-                # 双字词直接返回，支持精确与子词
-                return f'("{term}"^5 OR {term})'
+        term_lower = term.lower()
 
-            # 语义切分优先：使用 Jieba 提取有区分度的子短语与词元，杜绝盲目切出“构设”等无意义字符片段
+        # 1. 汉字连续词
+        if re.fullmatch(r"[\u4e00-\u9fff]{2,}", term):
             sub_words: list[str] = []
             try:
                 import jieba
@@ -274,9 +332,16 @@ class QueryCompiler:
             except Exception:
                 sub_words = []
 
-            # 若词典未收录该长词，降级为连续 2-gram 兜底
-            if not sub_words:
+            if not sub_words and len(term) > 2:
                 sub_words = [term[i : i + 2] for i in range(len(term) - 1)]
+
+            # 收集概念投影词
+            concept_additions: list[str] = []
+            if term in TECHNICAL_CONCEPT_MAP:
+                concept_additions.extend(TECHNICAL_CONCEPT_MAP[term][:3])
+            for sw in sub_words:
+                if sw in TECHNICAL_CONCEPT_MAP:
+                    concept_additions.extend(TECHNICAL_CONCEPT_MAP[sw][:2])
 
             seen = set()
             clean_sub = []
@@ -285,10 +350,23 @@ class QueryCompiler:
                     seen.add(w)
                     clean_sub.append(w)
 
-            sub_expr = " OR ".join(clean_sub)
-            return f'("{term}"^5 OR {sub_expr})' if clean_sub else f'"{term}"'
+            # 概念投影词去重与加权
+            clean_concepts = []
+            for c in concept_additions:
+                if c not in seen and c != term and c not in clean_sub:
+                    seen.add(c)
+                    clean_concepts.append(f'"{c}"^0.8' if " " in c else f"{c}^0.8")
 
-        # 中英混排（如 目录A、C++多线程、GPT-4o架构）
+            all_sub_clauses = clean_sub + clean_concepts[:4]
+            if len(term) == 2:
+                if clean_concepts:
+                    return f'("{term}"^5 OR {term} OR {" OR ".join(clean_concepts[:3])})'
+                return f'("{term}"^5 OR {term})'
+
+            sub_expr = " OR ".join(all_sub_clauses)
+            return f'("{term}"^5 OR {sub_expr})' if sub_expr else f'"{term}"'
+
+        # 2. 中英混排（如 目录A、C++多线程、GPT-4o架构）
         if re.search(r"[\u4e00-\u9fff]", term) and re.search(r"[a-zA-Z0-9]", term):
             from .tokenizer import tokenize_stream
             parts = [t for t in tokenize_stream(term) if t]
@@ -301,5 +379,11 @@ class QueryCompiler:
             if len(unique_parts) > 1:
                 return f'({" AND ".join(unique_parts)})'
 
-        # 西文、数字或代码符号
+        # 3. 西文、数字或代码符号：概念投影展开
+        if term_lower in TECHNICAL_CONCEPT_MAP:
+            concepts = TECHNICAL_CONCEPT_MAP[term_lower][:3]
+            c_clauses = [f'"{c}"^0.8' if " " in c else f"{c}^0.8" for c in concepts if c.lower() != term_lower]
+            if c_clauses:
+                return f'({term} OR {" OR ".join(c_clauses)})'
+
         return term
