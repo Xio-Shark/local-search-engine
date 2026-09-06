@@ -47,65 +47,10 @@ FIELD_ALIASES: dict[str, str] = {
     "content": "content",
 }
 
-# 双向技术概念投影表（弥补纯 BM25 面对自然语言与纯代码库的词汇鸿沟）
-TECHNICAL_CONCEPT_MAP: dict[str, list[str]] = {
-    # 鉴权 / 认证 / 权限 / 令牌
-    "鉴权": ["authenticate", "auth", "authenticator", "authorization", "jwt", "bearer", "token"],
-    "认证": ["authenticate", "auth", "authenticator", "authorization", "jwt", "token"],
-    "身份验证": ["authenticate", "auth", "credentials", "jwt", "token"],
-    "授权": ["authorize", "authorization", "permission", "rbac", "scope", "token"],
-    "令牌": ["token", "jwt", "bearer", "payload", "claims"],
-    # 限流 / 频控 / 流量控制
-    "限流": ["ratelimit", "rate_limit", "limiter", "token_bucket", "leaky_bucket", "sliding_window", "throttle"],
-    "频控": ["ratelimit", "rate_limit", "limiter", "throttle", "frequency"],
-    "防刷": ["ratelimit", "rate_limit", "throttle", "captcha"],
-    # 缓存 / 淘汰 / 穿透
-    "缓存": ["cache", "lru", "lru_cache", "redis", "memcached", "ttl"],
-    "淘汰": ["evict", "eviction", "invalidate", "lru", "ttl"],
-    "失效": ["invalidate", "expire", "expiration", "ttl"],
-    # 数据库 / 事务 / 连接池
-    "数据库": ["db", "database", "sql", "postgres", "mysql", "sqlite", "orm", "repository"],
-    "连接池": ["connection_pool", "pool", "conn_pool", "connection", "acquire_connection"],
-    "事务": ["transaction", "tx", "commit", "rollback", "contextmanager"],
-    "回滚": ["rollback", "abort", "revert"],
-    "提交": ["commit", "flush", "persist"],
-    # 网络 / 路由 / 控制器 / 中间件
-    "中间件": ["middleware", "interceptor", "filter", "pipeline"],
-    "拦截器": ["interceptor", "middleware", "filter"],
-    "路由": ["router", "route", "routing", "endpoint", "dispatch"],
-    "控制器": ["controller", "handler", "service", "action"],
-    "接口": ["api", "interface", "endpoint", "controller", "handler"],
-    # 序列化 / 编码 / 解码
-    "序列化": ["serialize", "serializer", "encode", "encoder", "json", "dumps", "marshal"],
-    "反序列化": ["deserialize", "decode", "decoder", "loads", "unmarshal", "parse"],
-    "解码": ["decode", "decoder", "deserialize", "unmarshal"],
-    "编码": ["encode", "encoder", "serialize", "charset"],
-    # 配置 / 环境变量
-    "配置": ["config", "configuration", "settings", "options", "preferences"],
-    "环境变量": ["environ", "env", "environment", "dotenv"],
-    # 重试 / 超时 / 异常 / 熔断
-    "重试": ["retry", "backoff", "attempt", "reconnect"],
-    "超时": ["timeout", "deadline", "timed_out"],
-    "熔断": ["circuit_breaker", "breaker", "fallback"],
-    "异常": ["exception", "error", "fault", "raise", "catch"],
-    # 英文核心技术词映射到代码别名与中文（支持自然语言英文查询命中中文文档与符号缩写）
-    "authenticate": ["auth", "authenticator", "jwt", "鉴权", "认证"],
-    "authenticator": ["authenticate", "auth", "jwt", "鉴权"],
-    "auth": ["authenticate", "authenticator", "jwt", "bearer", "鉴权", "认证"],
-    "jwt": ["token", "payload", "decode_token", "sign_token", "令牌"],
-    "limiter": ["rate_limit", "token_bucket", "ratelimit", "限流"],
-    "ratelimit": ["rate_limit", "limiter", "token_bucket", "限流"],
-    "pool": ["connection_pool", "acquire_connection", "连接池"],
-    "transaction": ["rollback", "commit", "tx", "事务"],
-    "rollback": ["revert", "abort", "回滚"],
-    "commit": ["提交", "persist", "flush"],
-    "contextmanager": ["__enter__", "__exit__", "scope", "context", "上下文管理器"],
-    "database": ["db", "sql", "数据库"],
-    "cache": ["lru", "eviction", "invalidate", "缓存"],
-    "invalidate": ["evict", "expire", "失效", "淘汰"],
-    "serializer": ["serialize", "json", "marshal", "序列化"],
-    "config": ["settings", "env", "environ", "配置"],
-}
+from .concepts import BASE_TECHNICAL_CONCEPTS
+
+# 双向技术概念投影表（弥补纯 BM25 面对自然语言与纯代码库的词汇鸿沟，支持动态扩展）
+TECHNICAL_CONCEPT_MAP: dict[str, list[str]] = BASE_TECHNICAL_CONCEPTS
 
 
 def parse_bytes(val: str) -> int:
@@ -209,8 +154,9 @@ class QueryLexer:
 class QueryCompiler:
     """AST 编译器：编译为健壮的 Tantivy Query 串并剥离排序指令。"""
 
-    def __init__(self, raw_query: str) -> None:
+    def __init__(self, raw_query: str, concept_map: dict[str, list[str]] | None = None) -> None:
         self.raw_query = raw_query
+        self.concept_map = concept_map or TECHNICAL_CONCEPT_MAP
         self.sort_field: str | None = None
         self.sort_order: tantivy.Order = tantivy.Order.Desc
 
@@ -337,11 +283,11 @@ class QueryCompiler:
 
             # 收集概念投影词
             concept_additions: list[str] = []
-            if term in TECHNICAL_CONCEPT_MAP:
-                concept_additions.extend(TECHNICAL_CONCEPT_MAP[term][:3])
+            if term in self.concept_map:
+                concept_additions.extend(self.concept_map[term][:3])
             for sw in sub_words:
-                if sw in TECHNICAL_CONCEPT_MAP:
-                    concept_additions.extend(TECHNICAL_CONCEPT_MAP[sw][:2])
+                if sw in self.concept_map:
+                    concept_additions.extend(self.concept_map[sw][:2])
 
             seen = set()
             clean_sub = []
@@ -380,8 +326,8 @@ class QueryCompiler:
                 return f'({" AND ".join(unique_parts)})'
 
         # 3. 西文、数字或代码符号：概念投影展开
-        if term_lower in TECHNICAL_CONCEPT_MAP:
-            concepts = TECHNICAL_CONCEPT_MAP[term_lower][:3]
+        if term_lower in self.concept_map:
+            concepts = self.concept_map[term_lower][:3]
             c_clauses = [f'"{c}"^0.8' if " " in c else f"{c}^0.8" for c in concepts if c.lower() != term_lower]
             if c_clauses:
                 return f'({term} OR {" OR ".join(c_clauses)})'
