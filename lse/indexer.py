@@ -13,6 +13,7 @@ import hashlib
 import json
 import os
 import shutil
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -194,17 +195,29 @@ class IndexEngine:
     def _write_batch(self, files: list[IndexableFile]) -> None:
         writer = self.index.writer(heap_size=128_000_000, num_threads=0)
         register_tokenizers(self.index)
+
+        def _process_file(f: IndexableFile) -> tuple[IndexableFile, str]:
+            text, file_hash = _read_and_hash(f.path)
+            f.content_hash = file_hash
+            tokens = prepare_index_tokens(text)
+            return f, tokens
+
         try:
-            for f in files:
-                text, file_hash = _read_and_hash(f.path)
-                f.content_hash = file_hash
+            if len(files) > 4:
+                workers = min(8, os.cpu_count() or 4)
+                with ThreadPoolExecutor(max_workers=workers) as executor:
+                    processed = list(executor.map(_process_file, files))
+            else:
+                processed = [_process_file(f) for f in files]
+
+            for f, tokens in processed:
                 writer.add_document(
                     tantivy.Document.from_dict(
                         {
                             "path": str(f.path),
                             "filename": f.path.name,
                             "extension": f.extension.lstrip("."),
-                            "content": prepare_index_tokens(text),
+                            "content": tokens,
                             "size": f.size_bytes,
                             "mtime": to_epoch_mtime(f.mtime),
                             "doc_type": f.doc_type,

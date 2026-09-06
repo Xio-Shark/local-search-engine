@@ -621,6 +621,61 @@ def _resolve_file_imports(file_path: str, content: str) -> tuple[dict[str, str],
 
         return symbol_to_file, imported_files
 
+    # 3. Rust 文件处理 (mod foo; use crate::foo::Bar)
+    if file_path.endswith(".rs"):
+        for m in re.finditer(r"\bmod\s+([a-zA-Z0-9_]+);", content):
+            mod_name = m.group(1)
+            cand1 = cur_dir / f"{mod_name}.rs"
+            cand2 = cur_dir / mod_name / "mod.rs"
+            target_f = cand1 if cand1.is_file() else (cand2 if cand2.is_file() else None)
+            if target_f:
+                target_str = str(target_f)
+                symbol_to_file[mod_name] = target_str
+                if target_str not in imported_files:
+                    imported_files.append(target_str)
+
+        for m in re.finditer(r"\buse\s+(?:crate::|super::)?([a-zA-Z0-9_:]+)::\{?([a-zA-Z0-9_,\s]+)\}?;", content):
+            mod_path_str, items = m.groups()
+            parts = mod_path_str.split("::")
+            cand = cur_dir.joinpath(*parts).with_suffix(".rs")
+            if cand.is_file():
+                target_str = str(cand)
+                if target_str not in imported_files:
+                    imported_files.append(target_str)
+                for item in items.split(","):
+                    sym = item.strip().split(" as ")[-1].strip()
+                    if sym:
+                        symbol_to_file[sym] = target_str
+
+    # 4. Go 文件处理
+    if file_path.endswith(".go"):
+        import_entries: list[tuple[str | None, str]] = []
+        for m in re.finditer(r"""import\s+(?:([a-zA-Z0-9_]+)\s+)?["']([^"']+)["']""", content):
+            alias, pkg = m.groups()
+            import_entries.append((alias, pkg))
+
+        for m in re.finditer(r"""import\s*\(([^)]+)\)""", content):
+            block = m.group(1)
+            for line in block.splitlines():
+                line = line.strip()
+                if not line or line.startswith("//"):
+                    continue
+                sub_m = re.search(r"""(?:([a-zA-Z0-9_]+)\s+)?["']([^"']+)["']""", line)
+                if sub_m:
+                    sub_alias, sub_pkg = sub_m.groups()
+                    import_entries.append((sub_alias, sub_pkg))
+
+        for alias, pkg in import_entries:
+            pkg_name = alias or pkg.split("/")[-1]
+            for cand_dir in candidate_roots:
+                cand = cand_dir / pkg_name
+                if cand.is_dir():
+                    for go_f in cand.glob("*.go"):
+                        go_str = str(go_f)
+                        if go_str not in imported_files:
+                            imported_files.append(go_str)
+                        symbol_to_file[pkg_name] = go_str
+
     return symbol_to_file, imported_files
 
 
@@ -664,17 +719,10 @@ def _find_symbol_definition(content: str, symbol: str, file_path: str) -> Depend
                         break
 
             if target_node:
-                start_l = target_node.lineno - 1
-                end_l = getattr(target_node, "end_lineno", len(lines))
                 kind = "class" if isinstance(target_node, ast.ClassDef) else (
                     "method" if target_parent else "def"
                 )
-                indent_str = " " * getattr(target_node, "col_offset", 0)
-                if end_l - start_l <= 18:
-                    code_slice = "\n".join(lines[start_l:end_l])
-                else:
-                    cut_end = min(start_l + 8, len(lines))
-                    code_slice = "\n".join(lines[start_l:cut_end]) + f"\n{indent_str}    # ... [implementation omitted]"
+                code_slice = _skeletonize_py_node(target_node, lines)
                 return DependencyBlock(
                     symbol=symbol,
                     file_path=file_path,
@@ -716,12 +764,7 @@ def _find_symbol_definition(content: str, symbol: str, file_path: str) -> Depend
                         break
                     end_idx = j
 
-            span_len = end_idx - idx + 1
-            if span_len <= 18:
-                snippet = "\n".join(lines[idx : end_idx + 1])
-            else:
-                cut_end = min(idx + 8, len(lines))
-                snippet = "\n".join(lines[idx:cut_end]) + "\n    // ... [implementation omitted]"
+            snippet = _skeletonize_general_code(lines, idx, end_idx, kind)
 
             return DependencyBlock(
                 symbol=symbol,
@@ -732,6 +775,87 @@ def _find_symbol_definition(content: str, symbol: str, file_path: str) -> Depend
             )
 
     return None
+
+
+def _skeletonize_py_node(node: ast.AST, lines: list[str]) -> str:
+    """为 Python 类或函数生成紧凑完整的接口存根（保留签名、类型注解与 Docstring，折叠函数体）。"""
+    start_l = node.lineno - 1
+    end_l = getattr(node, "end_lineno", len(lines))
+    total_lines = end_l - start_l
+
+    # 简短自闭合定义（<= 14 行）完整保留源码
+    if total_lines <= 14:
+        return "\n".join(lines[start_l:end_l])
+
+    indent = " " * getattr(node, "col_offset", 0)
+
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        body_start = node.body[0].lineno - 1 if node.body else node.lineno
+        sig_chunk = "\n".join(lines[start_l:body_start]).rstrip()
+        doc = ast.get_docstring(node)
+        if doc:
+            return f"{sig_chunk}\n{indent}    \"\"\"{doc}\"\"\"\n{indent}    ..."
+        else:
+            if sig_chunk.endswith(":"):
+                return f"{sig_chunk} ..."
+            return f"{sig_chunk}\n{indent}    ..."
+
+    elif isinstance(node, ast.ClassDef):
+        class_head = lines[start_l].rstrip()
+        doc = ast.get_docstring(node)
+        out = [class_head]
+        if doc:
+            out.append(f'{indent}    """{doc}"""')
+        for child in node.body:
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                child_start = child.lineno - 1
+                child_body_start = child.body[0].lineno - 1 if child.body else child.lineno
+                sig_chunk = "\n".join(lines[child_start:child_body_start]).strip()
+                child_doc = ast.get_docstring(child)
+                if child_doc:
+                    out.append(f"{indent}    {sig_chunk}")
+                    out.append(f'{indent}        """{child_doc}"""')
+                    out.append(f"{indent}        ...")
+                else:
+                    if sig_chunk.endswith(":"):
+                        out.append(f"{indent}    {sig_chunk} ...")
+                    else:
+                        out.append(f"{indent}    {sig_chunk}\n{indent}        ...")
+            elif isinstance(child, ast.AnnAssign) and isinstance(child.target, ast.Name):
+                field_line = lines[child.lineno - 1].strip()
+                out.append(f"{indent}    {field_line}")
+        return "\n".join(out)
+
+    return "\n".join(lines[start_l:min(start_l + 12, end_l)])
+
+
+def _skeletonize_general_code(lines: list[str], start_idx: int, end_idx: int, kind: str) -> str:
+    """多语言代码接口骨架抽取（针对长结构体/接口/类折叠深层函数体）。"""
+    total_lines = end_idx - start_idx + 1
+    if total_lines <= 14:
+        return "\n".join(lines[start_idx : end_idx + 1])
+
+    if kind in ("class", "interface", "struct", "trait", "type"):
+        out = []
+        brace_level = 0
+        for i in range(start_idx, end_idx + 1):
+            line = lines[i]
+            l_strip = line.strip()
+            if i == start_idx or brace_level <= 1:
+                if "{" in line and "}" not in line and not l_strip.startswith(("//", "/*", "*")):
+                    if brace_level == 1:
+                        sig = l_strip.split("{")[0].strip()
+                        out.append(f"    {sig} {{ ... }}")
+                    else:
+                        out.append(line)
+                elif brace_level <= 1:
+                    out.append(line)
+            brace_level += line.count("{") - line.count("}")
+        if len(out) >= 3:
+            return "\n".join(out)
+
+    cut_end = min(start_idx + 10, len(lines))
+    return "\n".join(lines[start_idx:cut_end]) + "\n    // ... [implementation omitted]"
 
 
 def copy_text_to_clipboard(text: str) -> bool:
