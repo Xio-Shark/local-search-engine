@@ -37,7 +37,14 @@ class IndexEngine:
         self.index_dir = Path(index_dir)
         self.index_dir.mkdir(parents=True, exist_ok=True)
         self.schema = build_schema()
-        self.index = tantivy.Index(self.schema, str(self.index_dir))
+        try:
+            self.index = tantivy.Index(self.schema, str(self.index_dir))
+        except ValueError as err:
+            if "schema does not match" in str(err).lower():
+                raise RuntimeError(
+                    f"索引 Schema 与当前版本不兼容: '{self.index_dir}'。请运行 'lse rebuild <path>' 重建索引。"
+                ) from err
+            raise
 
     # ---------- 公开操作 ----------
 
