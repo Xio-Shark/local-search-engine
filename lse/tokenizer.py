@@ -9,6 +9,7 @@ try:
     import jieba
     # Suppress jieba prefix dict initialization logs
     jieba.default_logger.setLevel(60)
+    jieba.initialize()
 except ImportError:
     jieba = None
 
@@ -35,19 +36,33 @@ def normalize_text(text: str) -> str:
 
 @lru_cache(maxsize=32768)
 def _cached_split_identifier(identifier: str) -> tuple[str, ...]:
+    if not identifier:
+        return ()
+    # Fast path 1: 纯小写标识符无需任何驼峰与符号切分（覆盖 >60% 代码标识符与关键字）
+    if identifier.isalnum():
+        if identifier.islower():
+            return (identifier,)
+        if identifier.isupper():
+            return (identifier.lower(),)
+
     parts = _SPLIT_PARTS_RE.split(identifier)
     sub_tokens: list[str] = []
 
     for part in parts:
         if not part:
             continue
-        camel_split = _CAMEL_RE1.sub(r"\1 \2", part)
-        camel_split = _CAMEL_RE2.sub(r"\1 \2", camel_split)
+        if part.islower():
+            sub_tokens.append(part)
+        elif part.isupper():
+            sub_tokens.append(part.lower())
+        else:
+            camel_split = _CAMEL_RE1.sub(r"\1 \2", part)
+            camel_split = _CAMEL_RE2.sub(r"\1 \2", camel_split)
 
-        words = [w.lower() for w in camel_split.split() if w]
-        sub_tokens.extend(words)
-        if len(words) > 1:
-            sub_tokens.append("".join(words))
+            words = [w.lower() for w in camel_split.split() if w]
+            sub_tokens.extend(words)
+            if len(words) > 1:
+                sub_tokens.append("".join(words))
 
     base_alpha = _BASE_ALPHA_RE.sub("", identifier).strip()
     if base_alpha and base_alpha.lower() not in sub_tokens:

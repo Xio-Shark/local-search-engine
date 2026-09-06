@@ -19,6 +19,7 @@ from pathlib import Path
 
 import tantivy
 
+from .concepts import AdaptiveConceptMiner, save_project_concepts
 from .config import DEFAULT_INDEX_DIR
 from .discovery import discover_files, is_text_file
 from .model import IndexStatus, IndexableFile
@@ -60,6 +61,11 @@ class IndexEngine:
         self.index = tantivy.Index(self.schema, str(self.index_dir))
         self._write_batch(files)
         self._save_state(files, roots)
+        try:
+            mined = AdaptiveConceptMiner().mine(files)
+            save_project_concepts(self.index_dir, mined)
+        except Exception:
+            pass
         return self.status()
 
     def update(
@@ -108,7 +114,8 @@ class IndexEngine:
                     # 元数据未发生任何变化：直接复用上一轮哈希，彻底杜绝无意义磁盘重读
                     f.content_hash = prev.get("hash", "")
 
-        writer = self.index.writer(heap_size=128_000_000, num_threads=0)
+        writer_threads = 1 if len(added_or_changed) < 1500 else min(2, os.cpu_count() or 2)
+        writer = self.index.writer(heap_size=128_000_000, num_threads=writer_threads)
         register_tokenizers(self.index)
         try:
             for path in removed:
@@ -147,6 +154,11 @@ class IndexEngine:
         ]
         all_roots = list({str(r.resolve()) for r in roots} | set(previous_roots))
         self._save_state_raw(preserved_files + current_serialized, all_roots)
+        try:
+            mined = AdaptiveConceptMiner().mine(files)
+            save_project_concepts(self.index_dir, mined)
+        except Exception:
+            pass
         return self.status()
 
     def rebuild(
@@ -174,7 +186,7 @@ class IndexEngine:
                             size_bytes=stat.st_size,
                             mtime=stat.st_mtime,
                             doc_type=_doc_type_for(root),
-                            content_hash=_compute_content_hash(root),
+                            content_hash="",
                         )
                     )
             elif root.is_dir():
@@ -193,7 +205,8 @@ class IndexEngine:
         return unique
 
     def _write_batch(self, files: list[IndexableFile]) -> None:
-        writer = self.index.writer(heap_size=128_000_000, num_threads=0)
+        writer_threads = 1 if len(files) < 1500 else min(2, os.cpu_count() or 2)
+        writer = self.index.writer(heap_size=128_000_000, num_threads=writer_threads)
         register_tokenizers(self.index)
 
         def _process_file(f: IndexableFile) -> tuple[IndexableFile, str]:

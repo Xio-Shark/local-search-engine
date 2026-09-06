@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any
 
 
+from .concepts import load_project_concepts
 from .config import (
     DEFAULT_INDEX_DIR,
     DEFAULT_SEARCH_FIELDS,
@@ -55,8 +56,9 @@ class SearchEngine:
         self.index.reload()
         searcher = self.index.searcher()
 
-        # 1. 形式化 AST 编译：提取排序指令、翻译别名与自适应展开
-        compiler = QueryCompiler(query)
+        # 1. 形式化 AST 编译：结合项目自适应概念图谱提取排序指令、翻译别名与自适应展开
+        concept_map = load_project_concepts(self.index_dir)
+        compiler = QueryCompiler(query, concept_map=concept_map)
         compiled_query, sort_field, sort_order = compiler.compile()
 
         # 2. 若去除排序指令后 query 为空，默认检索全部文档
@@ -223,33 +225,26 @@ class SearchEngine:
         return snippets
 
 
+from functools import lru_cache
+
+
+@lru_cache(maxsize=1024)
 def _read_disk_file(path_str: str) -> str:
-    """按需读取文档原文：对较大文件采用 mmap 内存映射读取，避免常规堆内存缓冲往返。"""
+    """按需读取文档原文（带 LRU 热点缓存，避免同次检索与依赖反查中重复磁盘 IO）。"""
     try:
         p = Path(path_str)
         if not p.is_file():
             return ""
-        size = p.stat().st_size
-        if size == 0:
+        raw = p.read_bytes()
+        if not raw:
             return ""
-        if size >= 16384:
-            try:
-                with open(p, "rb") as f:
-                    with mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as mm:
-                        data = mm.read()
-                        try:
-                            return data.decode("utf-8")
-                        except UnicodeDecodeError:
-                            return data.decode("gbk", errors="replace")
-            except OSError:
-                pass
         try:
-            return p.read_text(encoding="utf-8")
+            return raw.decode("utf-8")
         except UnicodeDecodeError:
             try:
-                return p.read_text(encoding="gbk")
+                return raw.decode("gbk")
             except (UnicodeDecodeError, OSError):
-                return p.read_text(encoding="utf-8", errors="replace")
+                return raw.decode("utf-8", errors="replace")
     except OSError:
         return ""
 
