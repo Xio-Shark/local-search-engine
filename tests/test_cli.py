@@ -61,3 +61,28 @@ def test_cli_ansi_highlight(tmp_path: Path, capsys):
     main(["--index-dir", str(idx_dir), "search", "美团"])
     captured = capsys.readouterr()
     assert "\033[1;33m美团\033[0m" in captured.out
+
+
+def test_cli_watch_invocation(tmp_path: Path, monkeypatch, capsys):
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    idx_dir = tmp_path / "index"
+    (data_dir / "a.txt").write_text("watch content", encoding="utf-8")
+
+    main(["--index-dir", str(idx_dir), "index", str(data_dir)])
+    capsys.readouterr()
+
+    import watchfiles
+
+    def mock_watch(*paths, **kwargs):
+        yield {(watchfiles.Change.modified, str(data_dir / "a.txt"))}
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(watchfiles, "watch", mock_watch)
+    ret = main(["--index-dir", str(idx_dir), "watch", str(data_dir)])
+    assert ret == 0
+    captured = capsys.readouterr()
+    assert "实时监听目录变动" in captured.out
+    assert "检测到 1 处文件变动" in captured.out
+    assert "已停止监听" in captured.out
+
