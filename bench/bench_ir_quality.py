@@ -368,12 +368,13 @@ def run_ir_benchmarks() -> None:
         hit_1_count = 0
         hit_3_count = 0
         reciprocal_ranks: list[float] = []
-        dep_recall_scores: list[float] = []
+        ext_recall_scores: list[float] = []
+        context_recall_scores: list[float] = []
         token_savings: list[float] = []
         latencies_ms: list[float] = []
 
-        print(f"{'Query':<40} | {'Rank':<5} | {'Deps':<8} | {'Tokens':<12} | {'Time'}")
-        print("-" * 75)
+        print(f"{'Query':<36} | {'Rank':<5} | {'ExtDeps':<8} | {'CtxCov':<8} | {'Tokens':<10} | {'Time'}")
+        print("-" * 80)
 
         for gq in BENCHMARK_QUERIES:
             t0 = time.perf_counter()
@@ -397,47 +398,69 @@ def run_ir_benchmarks() -> None:
             reciprocal_rank = 1.0 / rank if rank > 0 else 0.0
             reciprocal_ranks.append(reciprocal_rank)
 
-            # 评估 1-hop 依赖召回（在 dependencies 列表中或直接内嵌在 Anchor 代码中）
+            # 评估 1-hop 依赖召回（严谨区分：跨文件反查 vs 同文件语法自闭包）
             found_deps = {d.symbol for d in capsule.dependencies}
             anchor_combined_code = "\n".join(a.code for a in capsule.anchors)
+
+            target_code = (repo_dir / gq.target_file).read_text(encoding="utf-8")
+            external_deps = []
+            intra_file_deps = []
+            for d in gq.expected_deps:
+                if f"class {d}" in target_code or f"def {d}" in target_code:
+                    intra_file_deps.append(d)
+                else:
+                    external_deps.append(d)
+
+            # 外部跨文件反查召回（必须由 packer 真正反查并抽取到 dependencies 中）
+            if external_deps:
+                ext_hit = len([d for d in external_deps if d in found_deps])
+                ext_recall = ext_hit / len(external_deps)
+                ext_recall_scores.append(ext_recall)
+                ext_str = f"{int(ext_recall * 100)}%"
+            else:
+                ext_str = "—"
+
+            # 胶囊完整上下文覆盖率（外部依赖在 dependencies + 同文件符号被锚点闭包吸附）
             if gq.expected_deps:
-                matched_deps = [
+                matched_all = [
                     d for d in gq.expected_deps
                     if d in found_deps or f"class {d}" in anchor_combined_code or f"def {d}" in anchor_combined_code
                 ]
-                dep_recall = len(matched_deps) / len(gq.expected_deps)
+                cov_recall = len(matched_all) / len(gq.expected_deps)
+                context_recall_scores.append(cov_recall)
+                cov_str = f"{int(cov_recall * 100)}%"
             else:
-                dep_recall = 1.0
-            dep_recall_scores.append(dep_recall)
+                cov_str = "—"
 
             # 评估 Token 压缩率 (Capsule Tokens vs Full File Tokens)
-            target_full_text = (repo_dir / gq.target_file).read_text(encoding="utf-8")
+            target_full_text = target_code
             full_tokens = estimate_tokens(target_full_text)
             capsule_tokens = capsule.estimated_tokens
             saving = max(0.0, (full_tokens - capsule_tokens) / max(full_tokens, 1)) * 100.0
             token_savings.append(saving)
 
             rank_str = f"#{rank}" if rank > 0 else "MISS"
-            dep_str = f"{int(dep_recall * 100)}%"
             token_str = f"{capsule_tokens} tok"
-            print(f"{gq.query[:38]:<40} | {rank_str:<5} | {dep_str:<8} | {token_str:<12} | {elapsed:.2f}ms")
+            print(f"{gq.query[:34]:<36} | {rank_str:<5} | {ext_str:<8} | {cov_str:<8} | {token_str:<10} | {elapsed:.2f}ms")
 
         total = len(BENCHMARK_QUERIES)
         mrr = sum(reciprocal_ranks) / total
         hit_1_rate = (hit_1_count / total) * 100.0
         hit_3_rate = (hit_3_count / total) * 100.0
-        avg_dep_recall = (sum(dep_recall_scores) / total) * 100.0
+        avg_ext_recall = (sum(ext_recall_scores) / max(len(ext_recall_scores), 1)) * 100.0
+        avg_cov_recall = (sum(context_recall_scores) / max(len(context_recall_scores), 1)) * 100.0
         p50_latency = sorted(latencies_ms)[len(latencies_ms) // 2]
         p99_latency = sorted(latencies_ms)[int(len(latencies_ms) * 0.95)]
 
         print("=" * 72)
         print("🎯 IR 质量与 Context 压缩实测总结：")
-        print(f"  • Hit@1 准确率:            {hit_1_rate:.1f}% ({hit_1_count}/{total})")
-        print(f"  • Hit@3 准确率:            {hit_3_rate:.1f}% ({hit_3_count}/{total})")
-        print(f"  • MRR (平均倒数排名):       {mrr:.3f}")
-        print(f"  • 1-Hop 依赖符号召回率:     {avg_dep_recall:.1f}%")
-        print(f"  • 平均打包生成延迟 (P50):    {p50_latency:.2f} ms")
-        print(f"  • 95 分位打包延迟 (P95):    {p99_latency:.2f} ms")
+        print(f"  • Hit@1 准确率:                 {hit_1_rate:.1f}% ({hit_1_count}/{total})")
+        print(f"  • Hit@3 准确率:                 {hit_3_rate:.1f}% ({hit_3_count}/{total})")
+        print(f"  • MRR (平均倒数排名):            {mrr:.3f}")
+        print(f"  • 严格跨文件 1-Hop 依赖反查召回:  {avg_ext_recall:.1f}% ({len(ext_recall_scores)}组有效)")
+        print(f"  • 胶囊完整上下文符号覆盖率:      {avg_cov_recall:.1f}% ({len(context_recall_scores)}组有效)")
+        print(f"  • 平均打包生成延迟 (P50):         {p50_latency:.2f} ms")
+        print(f"  • 95 分位打包延迟 (P95):         {p99_latency:.2f} ms")
         print("=" * 72)
 
 

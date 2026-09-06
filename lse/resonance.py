@@ -68,9 +68,12 @@ def _analyze_structures(lines: list[str]) -> tuple[list[str], list[tuple[int, in
             symbol_stack.clear()
 
         # 2. 检查代码符号 (class, def, fn, func, etc.)
+        # 纯注释行不参与缩进层级弹栈判定（避免未缩进注释误破坏符号层级）
+        is_comment = line_clean.startswith(("#", "//", "/*", "*"))
         indent = len(line) - len(line.lstrip())
-        while symbol_stack and indent <= symbol_stack[-1][0] and not line.startswith(" "):
-            symbol_stack.pop()
+        if not is_comment:
+            while symbol_stack and indent <= symbol_stack[-1][0]:
+                symbol_stack.pop()
 
         sym_match = _CODE_SYMBOL_RE.match(line)
         if sym_match:
@@ -78,7 +81,32 @@ def _analyze_structures(lines: list[str]) -> tuple[list[str], list[tuple[int, in
             symbol_str = f"{kind} {name}"
             while symbol_stack and indent <= symbol_stack[-1][0]:
                 symbol_stack.pop()
-            symbol_stack.append((indent, symbol_str, idx))
+
+            # 计算该语法块的自然闭包结束行
+            block_end = idx
+            if "{" in line:
+                b_cnt = line.count("{") - line.count("}")
+                for j in range(idx + 1, num_lines):
+                    b_cnt += lines[j].count("{") - lines[j].count("}")
+                    block_end = j
+                    if b_cnt <= 0:
+                        break
+            else:
+                for j in range(idx + 1, num_lines):
+                    l_str = lines[j].strip()
+                    if not l_str or l_str.startswith(("#", "//", "/*", "*")):
+                        block_end = j
+                        continue
+                    l_ind = len(lines[j]) - len(lines[j].lstrip())
+                    if l_ind <= indent:
+                        break
+                    block_end = j
+
+            # 去除尾部空行
+            while block_end > idx and not lines[block_end].strip():
+                block_end -= 1
+
+            symbol_stack.append((indent, symbol_str, idx, block_end))
 
         # 3. 汇总当前行面包屑
         parts = [h[1] for h in md_heading_stack] + [s[1] for s in symbol_stack]
@@ -87,7 +115,8 @@ def _analyze_structures(lines: list[str]) -> tuple[list[str], list[tuple[int, in
 
         if symbol_stack:
             top_start = symbol_stack[-1][2]
-            blocks[idx] = (top_start, idx)
+            top_end = symbol_stack[-1][3]
+            blocks[idx] = (top_start, top_end)
 
     return breadcrumbs, blocks
 
@@ -225,10 +254,13 @@ def extract_evidence_spans(
                 blank_run = 0
             end_l += 1
 
-        # 若命中了语法结构块起点（且跨度在 40 行内），向前吸附至符号声明行
+        # 若命中了语法结构块（且跨度在 40 行内），自闭合吸附整个符号语法块
         if line_blocks[center_line]:
-            block_start = line_blocks[center_line][0]
-            if block_start < start_l and (end_l - block_start) <= 40:
+            block_start, block_end = line_blocks[center_line]
+            if (block_end - block_start) <= 40:
+                start_l = min(start_l, block_start)
+                end_l = max(end_l, block_end)
+            elif block_start < start_l and (end_l - block_start) <= 40:
                 start_l = block_start
 
         # 规整：剔除首尾的空白行

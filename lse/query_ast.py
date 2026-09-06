@@ -47,6 +47,30 @@ FIELD_ALIASES: dict[str, str] = {
     "content": "content",
 }
 
+# 开发者高频中英术语对齐表（解决自然语言与代码标识符词汇失配）
+DEV_TERM_SYNONYMS: dict[str, list[str]] = {
+    "transaction": ["事务"],
+    "transactions": ["事务"],
+    "rollback": ["回滚"],
+    "commit": ["提交"],
+    "database": ["数据库"],
+    "contextmanager": ["上下文", "上下文管理器"],
+    "authenticate": ["鉴权", "认证"],
+    "authenticator": ["鉴权器", "认证"],
+    "authentication": ["身份认证", "鉴权"],
+    "ratelimit": ["限流"],
+    "limiter": ["限流器", "限流"],
+    "cache": ["缓存"],
+    "caching": ["缓存"],
+    "token": ["令牌"],
+    "connection": ["连接", "连接池"],
+    "concurrency": ["并发"],
+    "serializer": ["序列化"],
+    "serialize": ["序列化"],
+    "deserializer": ["反序列化"],
+    "deserialize": ["反序列化"],
+}
+
 
 def parse_bytes(val: str) -> int:
     """解析带单位的大小字符串为字节数。"""
@@ -281,6 +305,13 @@ class QueryCompiler:
                     unique_parts.append(p)
             if len(unique_parts) > 1:
                 return f'({" AND ".join(unique_parts)})'
+
+        # 西文术语跨语言与语义扩展（如 transaction -> (transaction OR "事务")）
+        lower_term = term.lower()
+        if lower_term in DEV_TERM_SYNONYMS:
+            syns = DEV_TERM_SYNONYMS[lower_term]
+            syn_expr = " OR ".join(f'"{s}"' for s in syns)
+            return f'({term} OR {syn_expr})'
 
         # 西文、数字或代码符号
         return term

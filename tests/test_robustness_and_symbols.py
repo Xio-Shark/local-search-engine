@@ -97,3 +97,48 @@ def test_zero_storage_architecture(sample_corpus):
     doc = searcher.doc(searcher.search(engine.index.parse_query("*", ["content"]), 1).hits[0][1])
     assert doc.get_first("content") is None  # stored=False 生效
     assert doc.get_first("path") is not None
+
+
+def test_resonance_sibling_method_breadcrumbs():
+    """验证同类内并列方法退回上级缩进时，符号栈正确弹栈，杜绝面包屑串连。"""
+    code = """class OrderService:
+    def create_order(self):
+        print("create")
+
+    def cancel_order(self):
+        print("cancel")
+"""
+    spans = extract_evidence_spans(code, ["cancel"])
+    assert len(spans) >= 1
+    # 面包屑应为 class OrderService > def cancel_order，绝不包含 def create_order
+    assert "cancel_order" in spans[0].breadcrumbs
+    assert "create_order" not in spans[0].breadcrumbs
+
+
+def test_find_symbol_definition_class_methods():
+    """验证 _find_symbol_definition 能够正确深入类内部定位方法并识别 method 类型。"""
+    from lse.packer import _find_symbol_definition
+
+    py_code = """class Authenticator:
+    def __init__(self):
+        pass
+
+    def authenticate_header(self, auth: str) -> bool:
+        return bool(auth)
+"""
+    dep = _find_symbol_definition(py_code, "authenticate_header", "auth.py")
+    assert dep is not None
+    assert dep.symbol == "authenticate_header"
+    assert dep.kind == "method"
+    assert "def authenticate_header" in dep.code
+    assert dep.line_no == 5
+
+
+def test_bilingual_dev_term_synonym_expansion():
+    """验证开发高频词汇（如 transaction, rollback）跨语言自动扩展。"""
+    from lse.query_ast import QueryCompiler
+
+    c = QueryCompiler("transaction rollback")
+    compiled, _, _ = c.compile()
+    assert "事务" in compiled
+    assert "回滚" in compiled
