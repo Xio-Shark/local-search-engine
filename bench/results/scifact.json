@@ -1,0 +1,38 @@
+{
+  "dataset": "scifact",
+  "docs": 5183,
+  "queries": 300,
+  "top_k": 100,
+  "meta": {
+    "platform": "macOS-26.5.1-arm64-arm-64bit",
+    "python": "3.11.15",
+    "lse_version": "0.2.0",
+    "command": "bench/bench_public.py --dataset scifact --baselines lse,tantivy,ripgrep --output-json bench/results/scifact.json"
+  },
+  "results": {
+    "lse": {
+      "queries": 300.0,
+      "ndcg@10": 0.5682447183701879,
+      "recall@10": 0.6961666666666666,
+      "mrr@10": 0.5319907407407407,
+      "total_seconds": 8.933233082760125,
+      "p50_ms": 29.042750131338835
+    },
+    "tantivy": {
+      "queries": 300.0,
+      "ndcg@10": 0.6198709703293587,
+      "recall@10": 0.7474444444444444,
+      "mrr@10": 0.5852195767195768,
+      "total_seconds": 0.05006795795634389,
+      "p50_ms": 0.15637511387467384
+    },
+    "ripgrep": {
+      "queries": 300.0,
+      "ndcg@10": 0.04766557099097344,
+      "recall@10": 0.1025,
+      "mrr@10": 0.031136243386243382,
+      "total_seconds": 27.568969624582678,
+      "p50_ms": 92.88250003010035
+    }
+  }
+}

@@ -107,6 +107,21 @@ lse rebuild --yes /path/to/project
 
 > 注意：上述语料与 Gold Query 均由 benchmark 脚本自行生成，存在过拟合和关键词重叠风险，**不能作为对外泛化能力证明**。第三方公开数据集（BEIR/CodeSearchNet 等）及 ripgrep/原生 BM25 baseline 评测尚未接入。
 
+
+### 3. 第三方公开数据集评测
+
+已接入 BEIR / SciFact（5,183 篇文档，300 条测试查询）与 CoIR / CosQA（20,604 条 Python 代码片段，500 条测试查询），对比 lse、原生 Tantivy BM25 与 ripgrep term-count：
+
+```bash
+# BEIR SciFact
+uv run python bench/bench_public.py --dataset scifact --baselines lse,tantivy,ripgrep
+
+# CoIR CosQA（需要 pyarrow）
+uv run --extra eval python bench/bench_public.py --dataset cosqa --baselines lse,tantivy,ripgrep
+```
+
+SciFact 上 lse nDCG@10 为 0.5682，低于原生 Tantivy BM25 的 0.6199；CosQA 上两者接近（0.1569 vs 0.1610），ripgrep 明显落后。完整方法、环境、复现命令与原因分析见 [bench/PUBLIC_EVAL.md](bench/PUBLIC_EVAL.md)。当前为负向/持平结果，说明 query expansion、AND 默认语义、字段权重与 evidence span 成本仍需优化。
+
 ---
 
 ## 与 RAG 系统集成
