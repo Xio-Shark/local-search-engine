@@ -68,7 +68,7 @@ CosQA 上 lse 与原生 Tantivy BM25 的 nDCG@10 很接近（0.1569 vs 0.1610）
 
 - BEIR：`scifact`、`nfcorpus`、`fiqa`、`arguana` 等（zip 自动下载）
 - CoIR simple repos：`cosqa`、`apps`、`codefeedback-st/mt`、`synthetic-text2sql`、`stackoverflow-qa`、`codetrans-contest/dl`
-- CoIR CodeSearchNet：`codesearchnet-go/java/javascript/php/python/ruby`（parquet 自动下载，文件较大）
+- CoIR CodeSearchNet：`codesearchnet-go/java/javascript/php/python/ruby`（parquet 自动下载；python split 约 280,310 篇 corpus / 280,652 条 query，本轮未跑全量 benchmark，需后续增加流式/采样子集模式）
 
 ## 结论与下一步
 
