@@ -8,4 +8,7 @@
 - CLI: index / search / update / status / rebuild
 """
 
+from .options import SearchOptions
+
 __version__ = "0.2.0"
+__all__ = ["SearchOptions", "__version__"]

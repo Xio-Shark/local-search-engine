@@ -21,13 +21,13 @@ from typing import Any
 from .concepts import load_project_concepts
 from .config import (
     DEFAULT_INDEX_DIR,
-    DEFAULT_SEARCH_FIELDS,
     DEFAULT_SEARCH_LIMIT,
     SNIPPET_CONTEXT_CHARS,
     SNIPPET_MAX_COUNT,
 )
 from .indexer import IndexEngine
 from .model import SearchHit, SearchResult
+from .options import SearchOptions
 from .query_ast import QueryCompiler
 from .resonance import extract_evidence_spans
 from .schema import register_tokenizers
@@ -40,49 +40,74 @@ class SearchEngine:
     与 IndexEngine 共享同一 index_dir；查询前 reload 以看到最新提交。
     """
 
-    def __init__(self, index_dir: Path = DEFAULT_INDEX_DIR) -> None:
+    def __init__(
+        self, index_dir: Path = DEFAULT_INDEX_DIR, options: SearchOptions | None = None
+    ) -> None:
         self.index_dir = Path(index_dir)
+        self.options = options or SearchOptions()
         self.engine = IndexEngine(self.index_dir)
         self.index = self.engine.index
         # 每次打开索引后注册 tokenizer（不持久化），否则 parse_query 报未注册
         register_tokenizers(self.index)
 
-    def search(self, query: str, limit: int = DEFAULT_SEARCH_LIMIT) -> SearchResult:
+    def search(
+        self,
+        query: str,
+        limit: int = DEFAULT_SEARCH_LIMIT,
+        options: SearchOptions | None = None,
+    ) -> SearchResult:
         start = datetime.now()
         if not query or not query.strip():
             return SearchResult(query=query, hits=[], total_matches=0, elapsed_ms=0)
 
+        opts = options or self.options
         self.index.reload()
         searcher = self.index.searcher()
 
         # 1. 形式化 AST 编译：结合项目自适应概念图谱提取排序指令、翻译别名与自适应展开
         concept_map = load_project_concepts(self.index_dir)
-        compiler = QueryCompiler(query, concept_map=concept_map)
-        compiled_query, sort_field, sort_order = compiler.compile()
+        compiler = QueryCompiler(
+            query, concept_map=concept_map, expand_concepts=opts.concept_expansion
+        )
+        plain_terms = compiler.plain_terms() if opts.natural_query else None
 
-        # 2. 若去除排序指令后 query 为空，默认检索全部文档
-        effective_query = compiled_query.strip() or "*"
+        # 2. 纯词项自然语言查询：用与索引侧一致的分词器重写为带 IDF 权重的 OR 查询；
+        #    结构化语法（字段/布尔/短语/括号/排序）继续走 AST 编译路径。
+        natural_query: str | None = None
+        if plain_terms:
+            natural_query = _build_natural_query(plain_terms, compiler, searcher, opts)
+
+        if natural_query is not None:
+            effective_query = natural_query
+            sort_field: str | None = None
+            sort_order = None
+            conjunction_by_default = False
+        else:
+            compiled_query, sort_field, sort_order = compiler.compile()
+            effective_query = compiled_query.strip() or "*"
+            conjunction_by_default = opts.conjunction_by_default
+
         try:
             parsed = self.index.parse_query(
                 effective_query,
-                DEFAULT_SEARCH_FIELDS,
-                conjunction_by_default=True,
+                opts.query_fields,
+                conjunction_by_default=conjunction_by_default,
             )
         except ValueError:
             # 自愈降级 1：使用 Tantivy 容错分析器
             try:
                 parsed, _ = self.index.parse_query_lenient(
                     effective_query,
-                    DEFAULT_SEARCH_FIELDS,
-                    conjunction_by_default=True,
+                    opts.query_fields,
+                    conjunction_by_default=conjunction_by_default,
                 )
             except Exception:
                 # 自愈降级 2：剔除敏感操作符转为字面短语匹配，杜绝异常泄露
                 escaped = re.sub(r'["*+?^=!:{}\[\]()|\\\/~]', " ", query).strip()
                 parsed = self.index.parse_query(
                     f'"{escaped}"' if escaped else "*",
-                    DEFAULT_SEARCH_FIELDS,
-                    conjunction_by_default=True,
+                    opts.query_fields,
+                    conjunction_by_default=conjunction_by_default,
                 )
 
         # 3. 执行搜索（带排序或原生 BM25 相关性打分）
@@ -103,7 +128,7 @@ class SearchEngine:
             try:
                 parsed_loose = self.index.parse_query(
                     effective_query,
-                    DEFAULT_SEARCH_FIELDS,
+                    opts.query_fields,
                     conjunction_by_default=False,
                 )
                 hits_loose = searcher.search(parsed_loose, limit_val)
@@ -274,6 +299,69 @@ def _read_disk_file(path_str: str) -> str:
             _file_cache.pop(next(iter(_file_cache)))
         _file_cache[path_str] = (st.st_mtime_ns, st.st_size, text)
     return text
+
+
+_CJK_QUERY_RE = re.compile(r"[\u4e00-\u9fff]")
+
+
+def _build_natural_query(
+    terms: list[str],
+    compiler: QueryCompiler,
+    searcher,
+    options: SearchOptions,
+) -> str | None:
+    """把纯词项自然语言查询编译为与索引分词对齐的加权 OR 查询。
+
+    查询词首先经过与索引侧相同的 ``tokenize_stream`` 分词；随后按 BM25 IDF
+    计算词项权重（可关闭）。这样既避免了 query parser 默认分析器与索引
+    analyzer 不一致造成的词项错配，也保留了“稀有词更重要”的排序先验。
+
+    CJK 与中西混排词项仍走 ``QueryCompiler`` 的分组语义（例如 ``目录A``
+    编译为 ``目录 AND a``），避免被拆成 OR 后把 ``目录B`` 一并召回。
+    """
+    clauses: list[str] = []
+    seen_tokens: set[str] = set()
+    num_docs = max(int(searcher.num_docs), 1)
+
+    for term in terms:
+        if _CJK_QUERY_RE.search(term):
+            clause = compiler._compile_term(term)
+            if clause:
+                clauses.append(clause)
+            continue
+
+        candidates = list(tokenize_stream(term))
+        if options.concept_expansion:
+            for concept in compiler.concept_map.get(term.lower(), [])[:3]:
+                candidates.extend(tokenize_stream(str(concept)))
+        for token in candidates:
+            if not token or token in seen_tokens or not any(ch.isalnum() for ch in token):
+                continue
+            seen_tokens.add(token)
+            escaped = token.replace('"', '\\"')
+            boost = _term_idf_boost(searcher, token, num_docs, options.idf_power)
+            if boost is None:
+                clauses.append(f'"{escaped}"')
+            else:
+                clauses.append(f'"{escaped}"^{boost:.4f}')
+
+    if not clauses:
+        return None
+    return " OR ".join(clauses)
+
+
+def _term_idf_boost(searcher, term: str, num_docs: int, power: float | None) -> float | None:
+    """返回查询词项的 IDF 幂次权重；``None`` 表示保持 Tantivy 原生权重。"""
+    if power is None:
+        return None
+    try:
+        doc_freq = int(searcher.doc_freq("content", term))
+    except (TypeError, ValueError, RuntimeError):
+        return None
+    idf = math.log(1.0 + (num_docs - doc_freq + 0.5) / (doc_freq + 0.5))
+    if idf <= 0:
+        return None
+    return max(1e-3, idf ** max(power, 0.0))
 
 
 def _query_terms(query: str) -> list[str]:

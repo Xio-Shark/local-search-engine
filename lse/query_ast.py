@@ -103,11 +103,11 @@ class QueryLexer:
             upper_w = word.upper()
 
             if upper_w == "AND":
-                tokens.append(Token(TokenType.AND, "AND"))
+                tokens.append(Token(TokenType.AND, word))
             elif upper_w == "OR":
-                tokens.append(Token(TokenType.OR, "OR"))
+                tokens.append(Token(TokenType.OR, word))
             elif upper_w == "NOT":
-                tokens.append(Token(TokenType.NOT, "NOT"))
+                tokens.append(Token(TokenType.NOT, word))
             elif word.lower().startswith("sort:"):
                 tokens.append(Token(TokenType.SORT, word))
             elif ":" in word and not word.startswith(":"):
@@ -154,18 +154,60 @@ class QueryLexer:
 class QueryCompiler:
     """AST 编译器：编译为健壮的 Tantivy Query 串并剥离排序指令。"""
 
-    def __init__(self, raw_query: str, concept_map: dict[str, list[str]] | None = None) -> None:
+    def __init__(
+        self,
+        raw_query: str,
+        concept_map: dict[str, list[str]] | None = None,
+        expand_concepts: bool = True,
+    ) -> None:
         self.raw_query = raw_query
         self.concept_map = concept_map or TECHNICAL_CONCEPT_MAP
+        self.expand_concepts = expand_concepts
         self.sort_field: str | None = None
         self.sort_order: tantivy.Order = tantivy.Order.Desc
+        self._tokens: list[Token] | None = None
+
+    def tokenize(self) -> list[Token]:
+        """返回缓存的词法单元，供自然语言查询与结构化编译共享。"""
+        if self._tokens is None:
+            self._tokens = QueryLexer(self.raw_query).tokenize()
+        return self._tokens
+
+    def plain_terms(self) -> list[str] | None:
+        """若查询是纯词项自然语言查询则返回词项列表，否则返回 ``None``。
+
+        与结构化语法不同，自然语言中的 ``and`` / ``or`` / ``not`` 及括号
+        属于普通标点或停用词，不应触发 AND 语义（SciFact 等第三方语料中
+        大量 claim 含这些词）。因此这里仅把下列内容视为结构化语法：
+
+        - 字段表达式 ``field:value``、``sort:...``
+        - 引号短语、通配符 ``*``
+        - 大写的显式布尔操作符 ``AND`` / ``OR`` / ``NOT``
+
+        小写连接词与普通括号会被忽略，交由 ``tokenize_stream`` 与 BM25
+        统一处理。
+        """
+        terms: list[str] = []
+        for tok in self.tokenize():
+            if tok.type == TokenType.TERM:
+                if tok.value.strip() == "*":
+                    return None
+                terms.append(tok.value)
+            elif tok.type in (TokenType.AND, TokenType.OR, TokenType.NOT):
+                if tok.value.isupper():
+                    return None
+                terms.append(tok.value)
+            elif tok.type in (TokenType.LPAREN, TokenType.RPAREN):
+                continue
+            else:
+                return None
+        return terms
 
     def compile(self) -> tuple[str, str | None, tantivy.Order]:
         if not self.raw_query or not self.raw_query.strip():
             return "", None, self.sort_order
 
-        lexer = QueryLexer(self.raw_query)
-        tokens = lexer.tokenize()
+        tokens = self.tokenize()
 
         compiled_parts: list[str] = []
         open_parens = 0
@@ -182,10 +224,11 @@ class QueryCompiler:
                 compiled_parts.append(self._compile_term(tok.value))
             elif tok.type in (TokenType.AND, TokenType.OR, TokenType.NOT):
                 # 避免连续重复操作符
+                operator = tok.value.upper()
                 if compiled_parts and compiled_parts[-1] in ("AND", "OR", "NOT"):
-                    compiled_parts[-1] = tok.value
+                    compiled_parts[-1] = operator
                 else:
-                    compiled_parts.append(tok.value)
+                    compiled_parts.append(operator)
             elif tok.type == TokenType.LPAREN:
                 open_parens += 1
                 compiled_parts.append("(")
@@ -281,13 +324,14 @@ class QueryCompiler:
             if not sub_words and len(term) > 2:
                 sub_words = [term[i : i + 2] for i in range(len(term) - 1)]
 
-            # 收集概念投影词
+            # 收集概念投影词（可通过 expand_concepts 关闭）
             concept_additions: list[str] = []
-            if term in self.concept_map:
-                concept_additions.extend(self.concept_map[term][:3])
-            for sw in sub_words:
-                if sw in self.concept_map:
-                    concept_additions.extend(self.concept_map[sw][:2])
+            if self.expand_concepts:
+                if term in self.concept_map:
+                    concept_additions.extend(self.concept_map[term][:3])
+                for sw in sub_words:
+                    if sw in self.concept_map:
+                        concept_additions.extend(self.concept_map[sw][:2])
 
             seen = set()
             clean_sub = []
@@ -326,7 +370,7 @@ class QueryCompiler:
                 return f'({" AND ".join(unique_parts)})'
 
         # 3. 西文、数字或代码符号：概念投影展开
-        if term_lower in self.concept_map:
+        if self.expand_concepts and term_lower in self.concept_map:
             concepts = self.concept_map[term_lower][:3]
             c_clauses = [f'"{c}"^0.8' if " " in c else f"{c}^0.8" for c in concepts if c.lower() != term_lower]
             if c_clauses:
