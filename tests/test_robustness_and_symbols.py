@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+
 from lse.indexer import IndexEngine
 from lse.query_ast import QueryCompiler
 from lse.resonance import extract_evidence_spans

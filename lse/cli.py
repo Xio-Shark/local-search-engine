@@ -14,7 +14,7 @@ from . import __version__
 from .config import DEFAULT_INDEX_DIR, DEFAULT_SEARCH_LIMIT, MAX_SEARCH_LIMIT
 from .indexer import IndexEngine
 from .model import SearchResult
-from .searcher import SearchEngine
+from .searcher import SearchEngine, clear_content_cache
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -95,6 +95,7 @@ def _cmd_index(args) -> int:
     count = _collect_count(engine, args.paths, getattr(args, "exclude", None))
     print(f"🚀 开始全量索引: {count} 个文件 → {args.index_dir}")
     status = engine.build(args.paths, extra_exclude=getattr(args, "exclude", None))
+    clear_content_cache()
     _print_status(status)
     return 0
 
@@ -107,6 +108,7 @@ def _cmd_update(args) -> int:
         return 1
     print(f"🔄 增量更新: {roots}")
     status = engine.update(roots, extra_exclude=getattr(args, "exclude", None))
+    clear_content_cache()
     _print_status(status)
     return 0
 
@@ -169,6 +171,7 @@ def _cmd_rebuild(args) -> int:
     engine = IndexEngine(args.index_dir)
     print(f"🔄 重建索引: {args.paths}")
     status = engine.rebuild(args.paths, extra_exclude=getattr(args, "exclude", None))
+    clear_content_cache()
     _print_status(status)
     return 0
 
@@ -212,6 +215,7 @@ def _cmd_watch(args) -> int:
         ):
             print(f"\n⚡ 检测到 {len(changes)} 处文件变动，正在同步增量索引...")
             status = engine.update(resolved_roots, extra_exclude=extra_exclude)
+            clear_content_cache()
             print(f"   已更新: {status.doc_count} 篇文档 ({status.index_bytes / 1024:.1f} KB)")
     except ImportError:
         import time
@@ -219,6 +223,7 @@ def _cmd_watch(args) -> int:
         while True:
             time.sleep(max(getattr(args, "debounce", 2.0), 1.0))
             engine.update(resolved_roots, extra_exclude=extra_exclude)
+            clear_content_cache()
     except KeyboardInterrupt:
         print("\n🛑 已停止监听。")
         return 0
@@ -271,6 +276,7 @@ def _print_status(status) -> None:
 
 def _highlight_snippet(snippet: str, query: str) -> str:
     import re
+
     from .searcher import _query_terms
 
     terms = _query_terms(query)

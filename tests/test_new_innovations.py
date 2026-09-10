@@ -2,7 +2,14 @@
 
 import ast
 from pathlib import Path
-from lse.concepts import AdaptiveConceptMiner, merge_concept_maps, save_project_concepts, load_project_concepts, BASE_TECHNICAL_CONCEPTS
+
+from lse.concepts import (
+    BASE_TECHNICAL_CONCEPTS,
+    AdaptiveConceptMiner,
+    load_project_concepts,
+    merge_concept_maps,
+    save_project_concepts,
+)
 from lse.model import IndexableFile
 from lse.packer import _skeletonize_py_node
 from lse.query_ast import QueryCompiler

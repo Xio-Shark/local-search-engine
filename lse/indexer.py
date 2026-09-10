@@ -22,7 +22,7 @@ import tantivy
 from .concepts import AdaptiveConceptMiner, save_project_concepts
 from .config import DEFAULT_INDEX_DIR
 from .discovery import discover_files, is_text_file
-from .model import IndexStatus, IndexableFile
+from .model import IndexableFile, IndexStatus
 from .schema import build_schema, register_tokenizers, to_epoch_mtime
 from .tokenizer import prepare_index_tokens
 

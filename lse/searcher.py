@@ -10,14 +10,13 @@
 from __future__ import annotations
 
 import math
-import mmap
 import os
 import re
+import stat
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 from typing import Any
-
 
 from .concepts import load_project_concepts
 from .config import (
@@ -225,28 +224,56 @@ class SearchEngine:
         return snippets
 
 
-from functools import lru_cache
+# 正文缓存：key 为路径，value 为 (mtime_ns, size, text)。
+# 不使用 lru_cache，因为文件更新后 mtime/size 变化必须让旧内容失效。
+_FILE_CACHE_MAX = 1024
+_file_cache: dict[str, tuple[int, int, str]] = {}
 
 
-@lru_cache(maxsize=1024)
+def clear_content_cache() -> None:
+    """清空正文缓存。索引更新/监听变更后可主动调用。"""
+    _file_cache.clear()
+
+
 def _read_disk_file(path_str: str) -> str:
-    """按需读取文档原文（带 LRU 热点缓存，避免同次检索与依赖反查中重复磁盘 IO）。"""
+    """按需读取文档原文，并在文件 mtime/size 未变化时复用缓存。"""
     try:
-        p = Path(path_str)
-        if not p.is_file():
+        st = os.stat(path_str)
+        if not stat.S_ISREG(st.st_mode):
+            _file_cache.pop(path_str, None)
             return ""
-        raw = p.read_bytes()
-        if not raw:
-            return ""
-        try:
-            return raw.decode("utf-8")
-        except UnicodeDecodeError:
-            try:
-                return raw.decode("gbk")
-            except (UnicodeDecodeError, OSError):
-                return raw.decode("utf-8", errors="replace")
     except OSError:
+        _file_cache.pop(path_str, None)
         return ""
+
+    cached = _file_cache.get(path_str)
+    if cached and cached[0] == st.st_mtime_ns and cached[1] == st.st_size:
+        return cached[2]
+
+    try:
+        raw = Path(path_str).read_bytes()
+    except OSError:
+        _file_cache.pop(path_str, None)
+        return ""
+
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        try:
+            text = raw.decode("gbk")
+        except (UnicodeDecodeError, OSError):
+            text = raw.decode("utf-8", errors="replace")
+
+    # 读取期间文件若被修改，则不写入缓存，下一次调用会重新读取。
+    try:
+        st_after = os.stat(path_str)
+    except OSError:
+        return text
+    if st_after.st_mtime_ns == st.st_mtime_ns and st_after.st_size == st.st_size:
+        if len(_file_cache) >= _FILE_CACHE_MAX:
+            _file_cache.pop(next(iter(_file_cache)))
+        _file_cache[path_str] = (st.st_mtime_ns, st.st_size, text)
+    return text
 
 
 def _query_terms(query: str) -> list[str]:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import time
 from pathlib import Path
+
 from lse.indexer import IndexEngine, _compute_content_hash
 from lse.searcher import SearchEngine
 

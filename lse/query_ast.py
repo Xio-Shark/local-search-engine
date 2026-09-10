@@ -16,6 +16,8 @@ from enum import Enum, auto
 
 import tantivy
 
+from .concepts import BASE_TECHNICAL_CONCEPTS
+
 
 class TokenType(Enum):
     TERM = auto()
@@ -46,8 +48,6 @@ FIELD_ALIASES: dict[str, str] = {
     "mtime": "mtime",
     "content": "content",
 }
-
-from .concepts import BASE_TECHNICAL_CONCEPTS
 
 # 双向技术概念投影表（弥补纯 BM25 面对自然语言与纯代码库的词汇鸿沟，支持动态扩展）
 TECHNICAL_CONCEPT_MAP: dict[str, list[str]] = BASE_TECHNICAL_CONCEPTS

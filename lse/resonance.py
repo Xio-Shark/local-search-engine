@@ -46,7 +46,7 @@ def _analyze_structures(lines: list[str]) -> tuple[list[str], list[tuple[int, in
     blocks: list[tuple[int, int] | None] = [None] * num_lines
 
     md_heading_stack: list[tuple[int, str]] = []
-    symbol_stack: list[tuple[int, str, int]] = []  # (indent_or_depth, symbol_name, start_line)
+    symbol_stack: list[tuple[int, str, int, int]] = []  # (indent, symbol_name, start_line, end_line)
 
     for idx, line in enumerate(lines):
         line_clean = line.strip()

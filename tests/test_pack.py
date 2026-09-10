@@ -13,7 +13,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from lse.indexer import IndexEngine
-from lse.packer import ContextPacker, estimate_tokens, copy_text_to_clipboard
+from lse.packer import ContextPacker, copy_text_to_clipboard, estimate_tokens
 
 
 def _setup_mock_repo(tmp_path: Path) -> tuple[Path, Path]:
