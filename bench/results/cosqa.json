@@ -1,40 +1,50 @@
 {
   "dataset": "cosqa",
+  "qrels_split": "test",
   "docs": 20604,
   "queries": 500,
   "top_k": 100,
+  "lse_options": {
+    "natural_query": true,
+    "idf_power": 0.25,
+    "concept_expansion": true,
+    "query_fields": [
+      "content",
+      "filename",
+      "path"
+    ],
+    "conjunction_by_default": true
+  },
   "meta": {
     "platform": "macOS-26.5.1-arm64-arm-64bit",
     "python": "3.11.15",
     "lse_version": "0.2.0",
-    "command": "bench/bench_public.py --dataset cosqa --baselines lse,tantivy --output-json bench/results/cosqa.json",
-    "ripgrep_command": "bench/bench_public.py --dataset cosqa --baselines ripgrep --output-json bench/results/cosqa_ripgrep.json",
-    "note": "lse/tantivy and ripgrep were run in separate invocations on the same materialized corpus."
+    "command": "bench/bench_public.py --dataset cosqa --baselines lse,tantivy,ripgrep --output-json bench/results/cosqa.json"
   },
   "results": {
     "lse": {
       "queries": 500.0,
-      "ndcg@10": 0.15693582450403323,
-      "recall@10": 0.304,
-      "mrr@10": 0.11289761904761914,
-      "total_seconds": 40.609551458153874,
-      "p50_ms": 81.02654200047255
+      "ndcg@10": 0.170042832678159,
+      "recall@10": 0.318,
+      "mrr@10": 0.12595000000000023,
+      "total_seconds": 37.66165087511763,
+      "p50_ms": 74.40524967387319
     },
     "tantivy": {
       "queries": 500.0,
-      "ndcg@10": 0.1609586752292645,
-      "recall@10": 0.316,
-      "mrr@10": 0.11491349206349222,
-      "total_seconds": 0.10008754208683968,
-      "p50_ms": 0.18687499687075615
+      "ndcg@10": 0.1577782440927707,
+      "recall@10": 0.312,
+      "mrr@10": 0.11148015873015887,
+      "total_seconds": 0.10049412492662668,
+      "p50_ms": 0.16908301040530205
     },
     "ripgrep": {
       "queries": 500.0,
       "ndcg@10": 0.018537440915403814,
       "recall@10": 0.04,
       "mrr@10": 0.012099999999999996,
-      "total_seconds": 237.2232772083953,
-      "p50_ms": 457.70583394914865
+      "total_seconds": 211.58858829084784,
+      "p50_ms": 417.8651673719287
     }
   }
 }

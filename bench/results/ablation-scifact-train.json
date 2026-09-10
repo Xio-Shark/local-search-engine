@@ -1,0 +1,175 @@
+{
+  "dataset": "scifact",
+  "qrels_split": "train",
+  "docs": 5183,
+  "queries": 809,
+  "top_k": 100,
+  "meta": {
+    "platform": "macOS-26.5.1-arm64-arm-64bit",
+    "python": "3.11.15",
+    "lse_version": "0.2.0",
+    "command": "bench/bench_ablation.py --dataset scifact --qrels-split train --include-tantivy --output-json bench/results/ablation-scifact-train.json"
+  },
+  "variants": {
+    "structured_and": {
+      "natural_query": false,
+      "idf_power": 0.25,
+      "concept_expansion": true,
+      "query_fields": [
+        "content",
+        "filename",
+        "path"
+      ],
+      "conjunction_by_default": true
+    },
+    "structured_or": {
+      "natural_query": false,
+      "idf_power": 0.25,
+      "concept_expansion": true,
+      "query_fields": [
+        "content",
+        "filename",
+        "path"
+      ],
+      "conjunction_by_default": false
+    },
+    "natural_or": {
+      "natural_query": true,
+      "idf_power": null,
+      "concept_expansion": true,
+      "query_fields": [
+        "content",
+        "filename",
+        "path"
+      ],
+      "conjunction_by_default": true
+    },
+    "natural_idf025": {
+      "natural_query": true,
+      "idf_power": 0.25,
+      "concept_expansion": true,
+      "query_fields": [
+        "content",
+        "filename",
+        "path"
+      ],
+      "conjunction_by_default": true
+    },
+    "natural_idf010": {
+      "natural_query": true,
+      "idf_power": 0.1,
+      "concept_expansion": true,
+      "query_fields": [
+        "content",
+        "filename",
+        "path"
+      ],
+      "conjunction_by_default": true
+    },
+    "natural_idf050": {
+      "natural_query": true,
+      "idf_power": 0.5,
+      "concept_expansion": true,
+      "query_fields": [
+        "content",
+        "filename",
+        "path"
+      ],
+      "conjunction_by_default": true
+    },
+    "natural_idf025_content": {
+      "natural_query": true,
+      "idf_power": 0.25,
+      "concept_expansion": true,
+      "query_fields": [
+        "content"
+      ],
+      "conjunction_by_default": true
+    },
+    "natural_idf025_noconcept": {
+      "natural_query": true,
+      "idf_power": 0.25,
+      "concept_expansion": false,
+      "query_fields": [
+        "content",
+        "filename",
+        "path"
+      ],
+      "conjunction_by_default": true
+    }
+  },
+  "results": {
+    "tantivy_bm25": {
+      "queries": 809.0,
+      "ndcg@10": 0.6279148493476666,
+      "recall@10": 0.745962093119077,
+      "mrr@10": 0.5981826475955029,
+      "total_seconds": 0.4276187499053776,
+      "p50_ms": 0.46904198825359344
+    },
+    "structured_and": {
+      "queries": 809.0,
+      "ndcg@10": 0.5958428420079391,
+      "recall@10": 0.7130407911001235,
+      "mrr@10": 0.5650430670826219,
+      "total_seconds": 74.06556866690516,
+      "p50_ms": 93.51783385500312
+    },
+    "structured_or": {
+      "queries": 809.0,
+      "ndcg@10": 0.6082338028668485,
+      "recall@10": 0.7299340749896992,
+      "mrr@10": 0.575996232856554,
+      "total_seconds": 45.42570074973628,
+      "p50_ms": 54.21841703355312
+    },
+    "natural_or": {
+      "queries": 809.0,
+      "ndcg@10": 0.642506236502112,
+      "recall@10": 0.7783065512978987,
+      "mrr@10": 0.6063281142700176,
+      "total_seconds": 41.215280500240624,
+      "p50_ms": 49.33774983510375
+    },
+    "natural_idf025": {
+      "queries": 809.0,
+      "ndcg@10": 0.6487048002061198,
+      "recall@10": 0.7895344046147508,
+      "mrr@10": 0.6098087978495884,
+      "total_seconds": 39.32429316686466,
+      "p50_ms": 47.10145806893706
+    },
+    "natural_idf010": {
+      "queries": 809.0,
+      "ndcg@10": 0.6465327158225244,
+      "recall@10": 0.784899052327977,
+      "mrr@10": 0.6088591637726368,
+      "total_seconds": 38.99113450013101,
+      "p50_ms": 46.45108385011554
+    },
+    "natural_idf050": {
+      "queries": 809.0,
+      "ndcg@10": 0.6440662398912291,
+      "recall@10": 0.7827358879274825,
+      "mrr@10": 0.6052117056134357,
+      "total_seconds": 32.19774500001222,
+      "p50_ms": 38.477125111967325
+    },
+    "natural_idf025_content": {
+      "queries": 809.0,
+      "ndcg@10": 0.6487048002061198,
+      "recall@10": 0.7895344046147508,
+      "mrr@10": 0.6098087978495884,
+      "total_seconds": 28.914187458809465,
+      "p50_ms": 34.69562530517578
+    },
+    "natural_idf025_noconcept": {
+      "queries": 809.0,
+      "ndcg@10": 0.6487048002061198,
+      "recall@10": 0.7895344046147508,
+      "mrr@10": 0.6098087978495884,
+      "total_seconds": 31.243502624798566,
+      "p50_ms": 37.15108335018158
+    }
+  }
+}

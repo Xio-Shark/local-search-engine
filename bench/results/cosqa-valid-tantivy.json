@@ -1,0 +1,34 @@
+{
+  "dataset": "cosqa",
+  "qrels_split": "valid",
+  "docs": 20604,
+  "queries": 500,
+  "top_k": 100,
+  "lse_options": {
+    "natural_query": true,
+    "idf_power": 0.25,
+    "concept_expansion": true,
+    "query_fields": [
+      "content",
+      "filename",
+      "path"
+    ],
+    "conjunction_by_default": true
+  },
+  "meta": {
+    "platform": "macOS-26.5.1-arm64-arm-64bit",
+    "python": "3.11.15",
+    "lse_version": "0.2.0",
+    "command": "bench/bench_public.py --dataset cosqa --qrels-split valid --baselines tantivy --output-json bench/results/cosqa-valid-tantivy.json"
+  },
+  "results": {
+    "tantivy": {
+      "queries": 500.0,
+      "ndcg@10": 0.15858185304970318,
+      "recall@10": 0.326,
+      "mrr@10": 0.10880158730158736,
+      "total_seconds": 0.1187197919934988,
+      "p50_ms": 0.22900011390447617
+    }
+  }
+}
