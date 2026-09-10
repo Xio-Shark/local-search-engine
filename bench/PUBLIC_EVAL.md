@@ -66,6 +66,11 @@ uv run --extra eval python bench/bench_ablation.py \
   --dataset cosqa --qrels-split valid \
   --variants structured_and,structured_or,natural_or,natural_idf025,natural_idf050 \
   --output-json bench/results/ablation-cosqa-valid.json
+
+# native BM25 dev baseline（独立于 lse 变体，避免重复构建索引）
+uv run --extra eval python bench/bench_public.py \
+  --dataset cosqa --qrels-split valid --baselines tantivy \
+  --output-json bench/results/cosqa-valid-tantivy.json
 ```
 
 | 变体 | nDCG@10 | Recall@10 | MRR@10 | p50 | total |
