@@ -4,6 +4,7 @@ version = "0.2.0"
 description = "Modern local full-text search engine with dynamic evidence resonance spans, code-aware tokenization, and formal query AST"
 readme = "README.md"
 requires-python = ">=3.10"
+license = {text = "MIT"}
 dependencies = [
     "tantivy>=0.26,<0.27",
     "jieba>=0.42.1",
