@@ -11,7 +11,9 @@ corpus document as a .txt file, and computes nDCG@10 / Recall@10 / MRR@10.
 Examples:
   uv run python bench/bench_public.py --dataset scifact
   uv run python bench/bench_public.py --baselines lse,tantivy
+  uv run python bench/bench_public.py --dataset scifact --qrels-split train
   uv run python bench/bench_public.py --dataset nfcorpus --limit-queries 50
+  uv run python bench/bench_public.py --lse-query-mode structured --lse-conjunction or
 """
 
 from __future__ import annotations
@@ -34,7 +36,9 @@ from pathlib import Path
 from typing import Sequence
 
 from lse import __version__ as LSE_VERSION
+from lse.config import DEFAULT_SEARCH_FIELDS
 from lse.indexer import IndexEngine
+from lse.options import SearchOptions
 from lse.searcher import SearchEngine
 
 BEIR_URL = "https://public.ukp.informatik.tu-darmstadt.de/thakur/BEIR/datasets/{dataset}.zip"
@@ -124,18 +128,9 @@ def load_beir_queries(root: Path) -> dict[str, str]:
     return queries
 
 
-def load_beir_qrels(root: Path) -> dict[str, dict[str, float]]:
-    candidates = [
-        root / "qrels" / "test.tsv",
-        root / "qrels" / "dev.tsv",
-        root / "qrels.tsv",
-    ]
-    qrels_path = next((path for path in candidates if path.exists()), None)
-    if qrels_path is None:
-        raise FileNotFoundError(f"qrels file not found under {root}")
-
+def _read_beir_qrels_file(path: Path) -> dict[str, dict[str, float]]:
     qrels: dict[str, dict[str, float]] = {}
-    with qrels_path.open(encoding="utf-8", newline="") as handle:
+    with path.open(encoding="utf-8", newline="") as handle:
         reader = csv.reader(handle, delimiter="\t")
         for row in reader:
             if len(row) < 3:
@@ -148,6 +143,34 @@ def load_beir_qrels(root: Path) -> dict[str, dict[str, float]]:
             if score > 0:
                 qrels.setdefault(query_id, {})[doc_id] = score
     return qrels
+
+
+def load_beir_qrels(root: Path, split: str = "test") -> dict[str, dict[str, float]]:
+    """读取 BEIR qrels；支持 test / train / all 三个 split 视图。
+
+    SciFact 的 ``qrels/train.tsv``（809 条）可作为 dev split 调参，
+    ``qrels/test.tsv``（300 条）只用于最终报告。
+    """
+    if split == "all":
+        merged: dict[str, dict[str, float]] = {}
+        for name in ("train", "test"):
+            path = root / "qrels" / f"{name}.tsv"
+            if path.exists():
+                for query_id, labels in _read_beir_qrels_file(path).items():
+                    merged.setdefault(query_id, {}).update(labels)
+        if not merged:
+            raise FileNotFoundError(f"BEIR qrels not found under {root}")
+        return merged
+
+    candidates = [root / "qrels" / f"{split}.tsv"]
+    if split == "test":
+        # 兼容部分 BEIR 数据集只有 qrels/dev.tsv 的情况（旧行为）
+        candidates.append(root / "qrels" / "dev.tsv")
+    candidates.append(root / "qrels.tsv")
+    qrels_path = next((path for path in candidates if path.exists()), None)
+    if qrels_path is None:
+        raise FileNotFoundError(f"qrels split '{split}' not found under {root}")
+    return _read_beir_qrels_file(qrels_path)
 
 
 def materialize_docs(docs: Sequence[EvalDoc], parent: Path) -> tuple[Path, dict[str, str]]:
@@ -227,11 +250,16 @@ def evaluate_retriever(
 class LseRetriever:
     name = "lse"
 
-    def __init__(self, docs_dir: Path, name_to_id: dict[str, str]) -> None:
+    def __init__(
+        self,
+        docs_dir: Path,
+        name_to_id: dict[str, str],
+        options: SearchOptions | None = None,
+    ) -> None:
         self._tmp = Path(tempfile.mkdtemp(prefix="lse-public-"))
         self._index_dir = self._tmp / "index"
         IndexEngine(self._index_dir).build([docs_dir])
-        self._engine = SearchEngine(self._index_dir)
+        self._engine = SearchEngine(self._index_dir, options=options)
         self._name_to_id = name_to_id
 
     def retrieve(self, query: str, top_k: int) -> list[str]:
@@ -331,9 +359,15 @@ class RipgrepCountRetriever:
         return None
 
 
-def build_retriever(name: str, docs, docs_dir: Path, name_to_id: dict[str, str]):
+def build_retriever(
+    name: str,
+    docs,
+    docs_dir: Path,
+    name_to_id: dict[str, str],
+    lse_options: SearchOptions | None = None,
+):
     if name == "lse":
-        return LseRetriever(docs_dir, name_to_id)
+        return LseRetriever(docs_dir, name_to_id, options=lse_options)
     if name == "tantivy":
         return TantivyBm25Retriever(docs, name_to_id)
     if name == "ripgrep":
@@ -348,15 +382,56 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--baselines", default="lse,tantivy,ripgrep")
     parser.add_argument("--top-k", type=int, default=100)
     parser.add_argument("--limit-queries", type=int, default=0)
+    parser.add_argument(
+        "--qrels-split",
+        default="test",
+        choices=("test", "valid", "train", "all"),
+        help="BEIR: test/train/all；CoIR: test/valid/train/all。dev 调参用 train/valid，最终报告用 test。",
+    )
     parser.add_argument("--output-json", type=Path, default=None)
+
+    lse_group = parser.add_argument_group("lse query options")
+    lse_group.add_argument(
+        "--lse-query-mode",
+        choices=("natural", "structured"),
+        default="natural",
+        help="natural: 纯词项查询走分词对齐 + 加权 OR；structured: 旧 AST + 默认 AND。",
+    )
+    lse_group.add_argument("--lse-idf-power", type=float, default=0.25, help="自然查询词项 IDF 权重指数（默认 0.25）")
+    lse_group.add_argument("--lse-no-idf", action="store_true", help="关闭自然查询中的 IDF 词项加权")
+    lse_group.add_argument(
+        "--lse-concept-expansion",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="是否在自然查询中追加概念图谱同义词（默认开启）",
+    )
+    lse_group.add_argument("--lse-fields", default="", help="逗号分隔的默认搜索字段，默认 content,filename,path")
+    lse_group.add_argument(
+        "--lse-conjunction",
+        choices=("and", "or"),
+        default="and",
+        help="structured 模式的 conjunction_by_default（默认 and）",
+    )
     return parser.parse_args(argv)
+
+
+def search_options_from_args(args: argparse.Namespace) -> SearchOptions:
+    fields = tuple(field.strip() for field in args.lse_fields.split(",") if field.strip())
+    return SearchOptions(
+        natural_query=args.lse_query_mode == "natural",
+        idf_power=None if args.lse_no_idf else args.lse_idf_power,
+        concept_expansion=args.lse_concept_expansion,
+        query_fields=fields or DEFAULT_SEARCH_FIELDS,
+        conjunction_by_default=args.lse_conjunction == "and",
+    )
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
+    lse_options = search_options_from_args(args)
     try:
-        docs, queries, qrels = load_dataset(args.dataset, args.cache_dir)
-    except (FileNotFoundError, RuntimeError, ValueError) as error:
+        docs, queries, qrels = load_dataset(args.dataset, args.cache_dir, args.qrels_split)
+    except (FileNotFoundError, RuntimeError, ValueError, OSError) as error:
         print(f"dataset error: {error}", file=sys.stderr)
         return 2
 
@@ -365,8 +440,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         query_ids = query_ids[: args.limit_queries]
     selected_queries = {query_id: queries[query_id] for query_id in query_ids}
 
-    print(f"dataset={args.dataset} docs={len(docs)} queries={len(selected_queries)} "
-          f"qrels_queries={len(qrels)} top_k={args.top_k}")
+    print(f"dataset={args.dataset} split={args.qrels_split} docs={len(docs)} "
+          f"queries={len(selected_queries)} qrels_queries={len(qrels)} top_k={args.top_k}")
 
     with tempfile.TemporaryDirectory(prefix=f"lse-bench-{args.dataset}-") as tmp:
         workdir = Path(tmp)
@@ -375,7 +450,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         retriever_names = [name.strip() for name in args.baselines.split(",") if name.strip()]
         for name in retriever_names:
             print(f"running baseline={name} ...", file=sys.stderr)
-            retriever = build_retriever(name, docs, docs_dir, name_to_id)
+            retriever = build_retriever(name, docs, docs_dir, name_to_id, lse_options)
             try:
                 results[name] = evaluate_retriever(
                     retriever, selected_queries, qrels, args.top_k
@@ -394,9 +469,17 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     payload = {
         "dataset": args.dataset,
+        "qrels_split": args.qrels_split,
         "docs": len(docs),
         "queries": len(selected_queries),
         "top_k": args.top_k,
+        "lse_options": {
+            "natural_query": lse_options.natural_query,
+            "idf_power": lse_options.idf_power,
+            "concept_expansion": lse_options.concept_expansion,
+            "query_fields": list(lse_options.query_fields),
+            "conjunction_by_default": lse_options.conjunction_by_default,
+        },
         "meta": {
             "platform": platform.platform(),
             "python": sys.version.split()[0],
@@ -414,14 +497,18 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 
 
-def coir_file_spec(dataset: str) -> tuple[str, str, str, str]:
+def coir_file_spec(dataset: str, split: str = "test") -> tuple[str, str, str, str]:
+    """返回 CoIR 数据集的 HF 仓库内相对路径。
+
+    ``split`` 支持 test / valid / train；默认 test 以保持既有调用兼容。
+    """
     if dataset in COIR_SIMPLE_DATASETS:
         repo = f"CoIR-Retrieval/{COIR_SIMPLE_DATASETS[dataset]}"
         return (
             repo,
             "corpus/corpus-00000-of-00001.parquet",
             "queries/queries-00000-of-00001.parquet",
-            "data/test-00000-of-00001.parquet",
+            f"data/{split}-00000-of-00001.parquet",
         )
     if dataset.startswith("codesearchnet-"):
         language = dataset.split("-", 1)[1]
@@ -432,18 +519,19 @@ def coir_file_spec(dataset: str) -> tuple[str, str, str, str]:
             "CoIR-Retrieval/CodeSearchNet",
             f"{prefix}corpus/corpus-00000-of-00001.parquet",
             f"{prefix}queries/queries-00000-of-00001.parquet",
-            f"{prefix}qrels/test-00000-of-00001.parquet",
+            f"{prefix}qrels/{split}-00000-of-00001.parquet",
         )
     raise ValueError(f"unknown CoIR dataset: {dataset}")
 
 
-def ensure_coir_dataset(dataset: str, cache_dir: Path) -> tuple[Path, Path, Path]:
-    repo, corpus_rel, queries_rel, qrels_rel = coir_file_spec(dataset)
+def ensure_coir_dataset(dataset: str, cache_dir: Path, split: str = "test") -> tuple[Path, Path, Path]:
+    repo, corpus_rel, queries_rel, qrels_rel = coir_file_spec(dataset, split)
     root = cache_dir / "coir" / dataset
     root.mkdir(parents=True, exist_ok=True)
     corpus_path = root / "corpus.parquet"
     queries_path = root / "queries.parquet"
-    qrels_path = root / "qrels.parquet"
+    qrels_name = "qrels.parquet" if split == "test" else f"qrels-{split}.parquet"
+    qrels_path = root / qrels_name
 
     for target, relative in (
         (corpus_path, corpus_rel),
@@ -467,10 +555,24 @@ def _read_parquet(path: Path):
     return parquet.read_table(str(path))
 
 
-def load_coir_dataset(corpus_path: Path, queries_path: Path, qrels_path: Path):
+def _read_coir_qrels(qrels_path: Path) -> dict[str, dict[str, float]]:
+    qrels: dict[str, dict[str, float]] = {}
+    for row in _read_parquet(qrels_path).to_pylist():
+        score = float(row["score"])
+        if score <= 0:
+            continue
+        qrels.setdefault(str(row["query-id"]), {})[str(row["corpus-id"])] = score
+    return qrels
+
+
+def load_coir_dataset(
+    corpus_path: Path,
+    queries_path: Path,
+    qrels_path: Path,
+    extra_qrels_paths: Sequence[Path] = (),
+):
     corpus_rows = _read_parquet(corpus_path).to_pylist()
     query_rows = _read_parquet(queries_path).to_pylist()
-    qrels_rows = _read_parquet(qrels_path).to_pylist()
 
     docs = [
         EvalDoc(
@@ -484,21 +586,27 @@ def load_coir_dataset(corpus_path: Path, queries_path: Path, qrels_path: Path):
         str(row["_id"]): str(row.get("text") or "")
         for row in query_rows
     }
+
     qrels: dict[str, dict[str, float]] = {}
-    for row in qrels_rows:
-        score = float(row["score"])
-        if score <= 0:
-            continue
-        qrels.setdefault(str(row["query-id"]), {})[str(row["corpus-id"])] = score
+    for path in (qrels_path, *extra_qrels_paths):
+        for query_id, labels in _read_coir_qrels(path).items():
+            qrels.setdefault(query_id, {}).update(labels)
     return docs, queries, qrels
 
 
-def load_dataset(dataset: str, cache_dir: Path):
+def load_dataset(dataset: str, cache_dir: Path, qrels_split: str = "test"):
     if dataset in BEIR_DATASETS:
         root = ensure_beir_dataset(dataset, cache_dir)
-        return load_beir_corpus(root), load_beir_queries(root), load_beir_qrels(root)
+        return load_beir_corpus(root), load_beir_queries(root), load_beir_qrels(root, qrels_split)
     if dataset in COIR_DATASETS:
-        corpus_path, queries_path, qrels_path = ensure_coir_dataset(dataset, cache_dir)
+        corpus_path, queries_path, _ = ensure_coir_dataset(dataset, cache_dir, "test")
+        if qrels_split == "all":
+            qrels_paths = [
+                ensure_coir_dataset(dataset, cache_dir, split)[2]
+                for split in ("test", "valid", "train")
+            ]
+            return load_coir_dataset(corpus_path, queries_path, qrels_paths[0], qrels_paths[1:])
+        _, _, qrels_path = ensure_coir_dataset(dataset, cache_dir, qrels_split)
         return load_coir_dataset(corpus_path, queries_path, qrels_path)
     supported = sorted(BEIR_DATASETS | COIR_DATASETS)
     raise ValueError(f"unsupported dataset: {dataset}; choose one of {supported}")

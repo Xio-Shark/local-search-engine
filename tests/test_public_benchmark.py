@@ -17,6 +17,15 @@ def test_coir_simple_dataset_paths() -> None:
     assert qrels == "data/test-00000-of-00001.parquet"
 
 
+def test_coir_split_paths() -> None:
+    repo, _, _, qrels = coir_file_spec("cosqa", "valid")
+    assert repo == "CoIR-Retrieval/cosqa"
+    assert qrels == "data/valid-00000-of-00001.parquet"
+
+    _, _, _, train_qrels = coir_file_spec("cosqa", "train")
+    assert train_qrels == "data/train-00000-of-00001.parquet"
+
+
 def test_coir_codesearchnet_paths() -> None:
     repo, corpus, queries, qrels = coir_file_spec("codesearchnet-python")
     assert repo == "CoIR-Retrieval/CodeSearchNet"
