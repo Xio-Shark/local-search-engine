@@ -161,7 +161,7 @@ def save_project_concepts(index_dir: Path, concepts: dict[str, list[str]]) -> No
     """将项目自适应概念图谱持久化至索引目录。"""
     try:
         path = Path(index_dir) / CONCEPTS_FILE
-        path.write_text(json.dumps(concepts, ensure_ascii=False, indent=2))
+        path.write_text(json.dumps(concepts, ensure_ascii=False, indent=2), encoding="utf-8")
     except OSError:
         pass
 
@@ -174,7 +174,7 @@ def load_project_concepts(index_dir: Path | None = None) -> dict[str, list[str]]
     if not path.exists():
         return BASE_TECHNICAL_CONCEPTS
     try:
-        data = json.loads(path.read_text())
+        data = json.loads(path.read_text(encoding="utf-8"))
         if isinstance(data, dict):
             return merge_concept_maps(BASE_TECHNICAL_CONCEPTS, data)
         return BASE_TECHNICAL_CONCEPTS
