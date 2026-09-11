@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from bench.bench_public import (
@@ -8,6 +10,8 @@ from bench.bench_public import (
     aggregate_runs,
     coir_file_spec,
     paired_bootstrap,
+    sample_coir_docs,
+    select_sampled_query_ids,
 )
 
 
@@ -74,3 +78,49 @@ def test_aggregate_runs_reports_mean_and_std() -> None:
     assert aggregated["ndcg@10"] == pytest.approx(0.15)
     assert aggregated["runs"] == 2.0
     assert aggregated["std"]["ndcg@10"] == pytest.approx(0.05)
+
+class _FakeBatch:
+    def __init__(self, rows):
+        self._rows = rows
+
+    def to_pylist(self):
+        return list(self._rows)
+
+
+def test_select_sampled_query_ids_is_deterministic() -> None:
+    qrels = {f"q{i:03d}": {f"c{i}": 1.0} for i in range(100)}
+    selected_a = select_sampled_query_ids(qrels, 10, seed=42)
+    selected_b = select_sampled_query_ids(qrels, 10, seed=42)
+    assert selected_a == selected_b
+    assert len(selected_a) == 10
+    assert selected_a == sorted(selected_a)
+
+    assert select_sampled_query_ids(qrels, 0, seed=42) == sorted(qrels)
+    assert select_sampled_query_ids(qrels, 999, seed=42) == sorted(qrels)
+
+
+def test_sample_coir_docs_keeps_all_relevant_and_is_deterministic(monkeypatch) -> None:
+    rows = [
+        {"_id": "c0", "title": "", "text": "doc zero"},
+        {"_id": "c1", "title": "", "text": "doc one"},
+        {"_id": "c2", "title": "", "text": "doc two"},
+        {"_id": "c3", "title": "", "text": "doc three"},
+        {"_id": "c4", "title": "", "text": "doc four"},
+        {"_id": "c5", "title": "", "text": "doc five"},
+    ]
+
+    def _fake_batches(_path, batch_size=5000):
+        for start in range(0, len(rows), batch_size):
+            yield _FakeBatch(rows[start : start + batch_size])
+
+    import bench.bench_public as bench_public
+
+    monkeypatch.setattr(bench_public, "_iter_parquet_batches", _fake_batches)
+
+    relevant = {"c1", "c5"}
+    sampled_a = sample_coir_docs(Path("unused.parquet"), relevant, 4, seed=42, batch_size=2)
+    sampled_b = sample_coir_docs(Path("unused.parquet"), relevant, 4, seed=42, batch_size=2)
+
+    assert len(sampled_a) == 4
+    assert relevant <= {doc.doc_id for doc in sampled_a}
+    assert [doc.doc_id for doc in sampled_a] == [doc.doc_id for doc in sampled_b]

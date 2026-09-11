@@ -11,17 +11,27 @@
 | :--- | ---: | :--- | :--- | :--- |
 | BEIR / SciFact | 5,183 篇摘要 | `qrels/train.tsv`，809 条 | `qrels/test.tsv`，300 条 | nDCG@10 / Recall@10 / MRR@10，深度 100 |
 | CoIR / CosQA | 20,604 条 Python 代码 | `data/valid`，500 条 | `data/test`，500 条 | 同上 |
+| CoIR / CodeSearchNet-Python（采样） | 20,000 docs（固定种子） | 无官方 train qrels | 从 14,918 条 test qrels 中固定采样 2,000 条 | 同上 |
 
 SciFact train / test qrels 只有 1 条 query 重叠；CoIR CosQA 使用官方
 valid / test 划分。默认参数（`query_mode=auto` + `IDF^0.25`）只在 dev split
 上选择，随后原样跑 test split，避免在最终报告集上调参。
 
+CodeSearchNet 只有 test qrels，26 万级 corpus / query；本节报告的是
+`--sample-docs 20000 --sample-queries 2000 --seed 42` 的固定种子采样：
+先保留选中 query 的全部相关文档，再用 reservoir sampling 补足 20,000 篇，
+queries 只流式读取选中 qid。为避免在最终样本上调参，采样和查询路径
+实现完成后只跑一次，不基于该样本修改默认参数。
+
 Baseline：
 
 - **native Tantivy BM25**：默认 analyzer、`title` + `body` 字段、OR 解析、
-  原生 BM25 打分（Tantivy 0.26）。
+  原生 BM25 打分（Tantivy 0.26）。代码 query 含 Python/Java 语法导致默认
+  parser 报错时，先把非词字符替换为空白再解析，避免把 parser 失败误判成
+  检索能力差距；自然语言 query 仍走原始 parser。
 - **ripgrep term-count**：按查询词在文件中的出现次数排序，case-insensitive。
-- **lse**：Tantivy 之上的分词 / 查询编译层。
+- **lse**：Tantivy 之上的分词 / 查询编译层；代码片段会绕过 Query DSL
+  判定，按索引侧 tokenizer 走自然语言 OR 路径。
 
 ## 2. Query-level 消融（dev split）
 
@@ -98,18 +108,19 @@ uv run python bench/bench_public.py \
 
 | Baseline | nDCG@10 | Recall@10 | MRR@10 | p50 latency | total time |
 | :--- | ---: | ---: | ---: | ---: | ---: |
-| **lse（默认）** | **0.6492** | **0.7955** | **0.6074** | 20.3 ms | 6.6 s |
-| native Tantivy BM25 | 0.6199 | 0.7474 | 0.5852 | 0.17 ms | 0.05 s |
-| ripgrep term-count | 0.0477 | 0.1025 | 0.0311 | 82.4 ms | 24.9 s |
+| **lse（默认）** | **0.6492** | **0.7955** | **0.6074** | 20.07 ms | 6.41 s |
+| native Tantivy BM25 | 0.6232 | 0.7508 | 0.5886 | 0.15 ms | 0.05 s |
+| ripgrep term-count | 0.0477 | 0.1025 | 0.0311 | 73.49 ms | 22.06 s |
 
 paired bootstrap（nDCG@10，5000 次重采样）：
 
-- lse vs native BM25：mean diff **+0.0293**，95% CI **[+0.0042, +0.0553]**，
-  W/L/T = 67/50/183。
+- lse vs native BM25：mean diff **+0.0260**，95% CI **[+0.0006, +0.0518]**，
+  W/L/T = 66/51/183。
 - lse vs ripgrep：mean diff **+0.6015**，95% CI [+0.5577, +0.6459]。
 
 `--repeat 3 --deterministic-index` 下 lse / native nDCG@10 的 std 均为 0.0，
 结果稳定。SciFact 相比上一版 lse（0.5682）提升 **+0.0810**。
+`scifact-rank-only.json` 与 full 模式的 lse nDCG@10 完全相同（0.6492）。
 
 ### 3.2 CoIR / CosQA test（500 q）
 
@@ -122,22 +133,56 @@ uv run --extra eval python bench/bench_public.py \
 
 | Baseline | nDCG@10 | Recall@10 | MRR@10 | p50 latency | total time |
 | :--- | ---: | ---: | ---: | ---: | ---: |
-| **lse（默认）** | **0.1505** | 0.2980 | **0.1073** | 11.8 ms | 6.1 s |
-| native Tantivy BM25 | 0.1474 | 0.2880 | 0.1060 | 0.16 ms | 0.08 s |
-| ripgrep term-count | 0.0185 | 0.0400 | 0.0121 | 388.2 ms | 197.4 s |
+| **lse（默认）** | **0.1505** | 0.2980 | **0.1073** | 10.63 ms | 5.43 s |
+| native Tantivy BM25 | 0.1481 | 0.2900 | 0.1063 | 0.13 ms | 0.07 s |
+| ripgrep term-count | 0.0185 | 0.0400 | 0.0121 | 312.11 ms | 164.47 s |
 
 paired bootstrap（nDCG@10，5000 次重采样）：
 
-- lse vs native BM25：mean diff **+0.0031**，95% CI **[-0.0081, +0.0142]**，
-  W/L/T = 29/26/445。
+- lse vs native BM25：mean diff **+0.0025**，95% CI **[-0.0087, +0.0136]**，
+  W/L/T = 28/26/446。
 
 **结论要诚实**：在 deterministic 且可复现的口径下，CosQA 上 lse 仅比原生
-BM25 高约 0.003，95% CI 跨 0，**不能宣称统计显著超越**；上一轮非确定性
-运行（索引 segment 布局不同）曾出现 lse 0.1700 / native 0.1578，但该差异
-对并列排序高度敏感，不应作为最终结论。需要 CodeSearchNet / 更大测试集
-或多次运行均值来进一步判断。
+BM25 高约 0.0025，95% CI 跨 0，**不能宣称统计显著超越**；上一轮非确定性
+运行（索引 segment 布局不同）曾出现更大的差距，但该差异对并列排序高度
+敏感，不应作为最终结论。`cosqa-rank-only.json` 与 full 模式的 lse
+nDCG@10 完全相同（0.1505）。
 
-## 4. 延迟：概念图缓存（P0）与 evidence span 成本
+### 3.3 CoIR / CodeSearchNet-Python 固定种子采样（2,000 q）
+
+```bash
+uv run --extra eval python bench/bench_public.py \
+  --dataset codesearchnet-python \
+  --sample-docs 20000 --sample-queries 2000 --seed 42 \
+  --baselines lse,tantivy \
+  --deterministic-index --repeat 3 --bootstrap-samples 5000 \
+  --output-json bench/results/codesearchnet-python-sample.json
+
+# rank-only 复跑：nDCG 与 full 完全一致
+uv run --extra eval python bench/bench_public.py \
+  --dataset codesearchnet-python \
+  --sample-docs 20000 --sample-queries 2000 --seed 42 \
+  --baselines lse,tantivy \
+  --deterministic-index --repeat 3 --lse-rank-only \
+  --output-json bench/results/codesearchnet-python-sample-rank-only.json
+```
+
+| Baseline | nDCG@10 | Recall@10 | MRR@10 | full p50 | rank p50 |
+| :--- | ---: | ---: | ---: | ---: | ---: |
+| lse（默认） | 0.9451 | **0.9805** | 0.9336 | 32.14 ms | 1.13 ms |
+| native Tantivy BM25 | **0.9453** | 0.9750 | **0.9355** | 0.47 ms | 0.47 ms |
+
+paired bootstrap（nDCG@10，5000 次重采样）：
+
+- lse vs native BM25：mean diff **-0.0002**，95% CI **[-0.0059, +0.0056]**，
+  W/L/T = 76/93/1831。
+
+**决策门结论**：固定种子 CodeSearchNet 采样上 lse 与 native BM25 基本
+打平（CI 跨 0，均值还略低 0.0002），Recall 略高、MRR 略低。因此**不能
+宣称 lse 在代码检索上领先**；后续应先查 tokenizer / IDF / 字段权重，
+而不是直接上 reranker / 向量检索。真实代码检索的结论仍是“未确认”。
+
+## 4. 延迟：概念图缓存（P0）、rank-only 与 evidence span 成本
 
 profiling（SciFact，`limit=10`）显示旧实现每个 query 都执行
 `load_project_concepts()`：JSON parse + `merge_concept_maps(base, dynamic)`，
@@ -148,15 +193,27 @@ profiling（SciFact，`limit=10`）显示旧实现每个 query 都执行
 | 动态概念图条目 | 10,373 keys / 41,492 邻居 / 1.09 MB | 上限 2,048 keys |
 | 合并后概念图 | 每次搜索重新 parse + merge | mtime/size keyed LRU |
 | `load_project_concepts` | 8.8 ms/次 | 首次 1.2 ms，缓存命中 0.011 ms |
-| `search(limit=10)` p50 | 11.5 ms | **2.15 ms** |
-| `search(limit=100)` p50 | 29.0 ms | **19.9 ms** |
-| SciFact public benchmark lse p50 | 29.2 ms | **20.3 ms** |
-| CosQA public benchmark lse p50 | 74.4 ms | **11.8 ms** |
+| `search(limit=10)` p50（full） | 11.5 ms | **2.15 ms** |
+| `search(limit=100)` p50（full） | 29.0 ms | **19.9 ms** |
+| SciFact public full p50 | 29.2 ms | **20.07 ms** |
+| CosQA public full p50 | 74.4 ms | **10.63 ms** |
+| CodeSearchNet sample full p50 | — | **32.14 ms** |
 
-剩余延迟主要是命中后读取正文、计算 evidence span / snippet；纯
-`compile + parse + rank` p50 实测约 **0.14 ms**。后续可增加
-`include_spans=False` 的 rank-only 模式，让 Agent 预筛和 benchmark 使用
-与原生 BM25 同口径的排序延迟。
+`SearchOptions.include_spans=False` 已实现 rank-only 模式：只读 stored
+元数据并返回 `path/filename/extension/size/mtime/score`，完全跳过
+`_read_disk_file` 与 `extract_evidence_spans`，排序路径和 full 模式相同：
+
+| 数据集 | lse full p50 | lse rank-only p50 | native BM25 p50 | nDCG 是否一致 |
+| :--- | ---: | ---: | ---: | :--- |
+| SciFact test | 20.07 ms | **0.70 ms** | 0.15 ms | 完全一致 (0.6492) |
+| CosQA test | 10.63 ms | **0.70 ms** | 0.13 ms | 完全一致 (0.1505) |
+| CodeSearchNet-Python 采样 | 32.14 ms | **1.13 ms** | 0.47 ms | 完全一致 (0.9451) |
+
+full p50 包含命中后读取正文、计算 evidence span / snippet，是 Agent 拿到
+上下文时的真实成本；rank-only p50 则与原生 BM25 同口径，适合 Agent 预筛
+和大规模 rerank 前召回。CodeSearchNet 长代码 query 的 rank-only p50 略高
+于 1 ms，量级仍与原生 BM25 相同（亚 2 ms），主要成本在长 query 的
+tokenizer / IDF 编译。
 
 ## 5. 实现摘要
 
@@ -165,22 +222,28 @@ profiling（SciFact，`limit=10`）显示旧实现每个 query 都执行
 1. **auto 查询模式**：短关键词查询（≤ 3 个内容词元、无句末标点）→ 结构化
    AND，保留文件搜索精度；长句 / claim → 用索引侧同一套 `tokenize_stream`
    分词，编译成字段内 OR-of-terms，并按 `IDF^0.25` 加权。
-2. **结构化语法**（`ext:py`、`filename:...`、大写 `AND/OR/NOT`、引号短语、
+2. **代码片段识别**：整段含换行或出现强代码声明形态时，忽略 Query DSL
+   语法（Python 字符串引号、dict `name:`、类型标注等），直接按索引侧
+   tokenizer 走自然语言 OR 路径。
+3. **结构化语法**（`ext:py`、`filename:...`、大写 `AND/OR/NOT`、引号短语、
    `sort:...`、`*`）→ 走 AST 查询编译器，默认 AND。
-3. **CJK / 中西混排** → 保留分组语义，例如 `目录A` 编译为 `目录 AND a`。
-4. **概念图缓存**：合并后的概念图按 `(path, mtime_ns, size)` LRU 缓存，
+4. **CJK / 中西混排** → 保留分组语义，例如 `目录A` 编译为 `目录 AND a`。
+5. **rank-only 模式**：`SearchOptions(include_spans=False)` 只返回排序
+   元数据，不读取正文 / 不计算 span，用于 Agent 预筛与公平延迟基准。
+6. **概念图缓存**：合并后的概念图按 `(path, mtime_ns, size)` LRU 缓存，
    索引更新自动失效；`AdaptiveConceptMiner` 默认限制动态图 2,048 条。
-5. **benchmark 可复现性**：`--deterministic-index`、`--repeat N`、
-   per-query JSON、paired bootstrap（`--bootstrap-samples` / `--bootstrap-metric`）。
+7. **benchmark 可复现性**：`--deterministic-index`、`--repeat N`、
+   per-query JSON、paired bootstrap（`--bootstrap-samples` / `--bootstrap-metric`）、
+   固定种子 CoIR 采样（`--sample-docs` / `--sample-queries` / `--seed`）。
 
 ## 6. 已知边界
 
-1. CosQA / tie-heavy 数据集上 lse 相对原生 BM25 的领先很小且不显著；
-   不应把 SciFact 的结论直接外推到代码检索。
-2. lse p50 仍高于原生 BM25，因为包含正文读取 + evidence span；排序本身
-   已是亚毫秒级。
-3. CodeSearchNet 全量尚未运行：python split 约 280,310 docs / 280,652
-   queries，需要流式 parquet 或固定种子采样子集；当前 file materialize
-   路线会产生 28 万小文件。
+1. CosQA 与 CodeSearchNet 采样上 lse 相对原生 BM25 均不显著（CI 跨 0）；
+   不能把 SciFact 的结论外推到代码检索，也不能宣称代码检索领先。
+2. rank-only p50 与原生 BM25 同量级，但 full p50 仍高一个数量级，因为
+   包含正文读取 + evidence span；排序本身已是亚毫秒到 1.1 ms。
+3. CodeSearchNet 目前只跑固定种子采样（20k docs / 2k queries），未跑全量
+   280,310 docs；如果后续需要全量，应继续使用流式 parquet + 采样，
+   不能 materialize 28 万个小文件。
 4. tree-sitter 多语言符号解析尚未接入，符号闭包仍以正则 / AST 混合实现。
 5. evidence span 目前只用于展示，不参与排序；所有质量提升来自查询编译层。

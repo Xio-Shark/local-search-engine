@@ -1,0 +1,71 @@
+{
+  "dataset": "codesearchnet-python",
+  "qrels_split": "test",
+  "docs": 20000,
+  "queries": 2000,
+  "top_k": 100,
+  "repeat": 3,
+  "deterministic_index": true,
+  "sampling": {
+    "requested_docs": 20000,
+    "requested_queries": 2000,
+    "seed": 42
+  },
+  "lse_options": {
+    "query_mode": "auto",
+    "natural_query": null,
+    "idf_power": 0.25,
+    "concept_expansion": true,
+    "query_fields": [
+      "content",
+      "filename",
+      "path"
+    ],
+    "conjunction_by_default": true,
+    "include_spans": false,
+    "rank_only": true
+  },
+  "meta": {
+    "platform": "macOS-26.5.1-arm64-arm-64bit",
+    "python": "3.11.15",
+    "lse_version": "0.2.0",
+    "command": "bench/bench_public.py --dataset codesearchnet-python --sample-docs 20000 --sample-queries 2000 --seed 42 --baselines lse,tantivy --deterministic-index --repeat 3 --bootstrap-samples 0 --lse-rank-only --output-json bench/results/codesearchnet-python-sample-rank-only.json"
+  },
+  "significance": {},
+  "results": {
+    "lse": {
+      "queries": 2000.0,
+      "ndcg@10": 0.9450571133512989,
+      "recall@10": 0.9805,
+      "mrr@10": 0.933645833333333,
+      "total_seconds": 2.4717535828240216,
+      "p50_ms": 1.1298473303516705,
+      "runs": 3.0,
+      "std": {
+        "queries": 0.0,
+        "ndcg@10": 0.0,
+        "recall@10": 0.0,
+        "mrr@10": 0.0,
+        "total_seconds": 0.02447670184552249,
+        "p50_ms": 0.00636195135748387
+      }
+    },
+    "tantivy": {
+      "queries": 2000.0,
+      "ndcg@10": 0.9452801121038914,
+      "recall@10": 0.975,
+      "mrr@10": 0.9355263888888886,
+      "total_seconds": 1.0704824721130233,
+      "p50_ms": 0.47193048521876335,
+      "runs": 3.0,
+      "std": {
+        "queries": 0.0,
+        "ndcg@10": 0.0,
+        "recall@10": 0.0,
+        "mrr@10": 0.0,
+        "total_seconds": 0.01626075587152846,
+        "p50_ms": 0.003976999427974003
+      }
+    }
+  }
+}

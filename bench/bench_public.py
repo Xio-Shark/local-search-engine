@@ -25,6 +25,7 @@ import math
 import os
 import platform
 import random
+import re
 import shutil
 import statistics
 import subprocess
@@ -402,7 +403,14 @@ class TantivyBm25Retriever:
         try:
             parsed = self._index.parse_query(query, ["title", "body"])
         except Exception:
-            parsed, _ = self._index.parse_query_lenient(query, ["title", "body"])
+            # 代码 query 含 Python/Java 语法时默认 query parser 会报 Syntax Error。
+            # 为了不把 baseline 的“解析失败”误当成检索能力差距，先把代码标点
+            # 归一化为空白再做原生 BM25 查询；自然语言查询仍走原始 parser。
+            safe_query = _native_code_query_fallback(query)
+            try:
+                parsed = self._index.parse_query(safe_query, ["title", "body"])
+            except Exception:
+                parsed, _ = self._index.parse_query_lenient(safe_query, ["title", "body"])
         hits = self._searcher.search(parsed, top_k)
         ranked: list[str] = []
         for _score, address in hits.hits:
@@ -414,6 +422,13 @@ class TantivyBm25Retriever:
 
     def close(self) -> None:
         shutil.rmtree(self._tmp, ignore_errors=True)
+
+
+def _native_code_query_fallback(query: str) -> str:
+    """默认 parser 失败的代码 query 兜底：保留词字符，其余标点转空白。"""
+    cleaned = re.sub(r"[^0-9A-Za-z_\s]+", " ", query)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned or "*"
 
 
 class RipgrepCountRetriever:
@@ -482,6 +497,24 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--top-k", type=int, default=100)
     parser.add_argument("--limit-queries", type=int, default=0)
     parser.add_argument(
+        "--sample-docs",
+        type=int,
+        default=0,
+        help="CoIR 固定种子采样文档数；0 表示全量（CodeSearchNet 建议 20000）",
+    )
+    parser.add_argument(
+        "--sample-queries",
+        type=int,
+        default=0,
+        help="CoIR 固定种子采样 query 数；0 表示全量（CodeSearchNet 建议 2000）",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="采样与 paired bootstrap 的随机种子（默认 42）",
+    )
+    parser.add_argument(
         "--qrels-split",
         default="test",
         choices=("test", "valid", "train", "all"),
@@ -534,6 +567,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         default="and",
         help="structured 模式的 conjunction_by_default（默认 and）",
     )
+    lse_group.add_argument(
+        "--lse-rank-only",
+        action="store_true",
+        help="lse 只执行 compile + parse + rank，不读取正文 / 不计算 evidence span",
+    )
     return parser.parse_args(argv)
 
 
@@ -545,6 +583,7 @@ def search_options_from_args(args: argparse.Namespace) -> SearchOptions:
         concept_expansion=args.lse_concept_expansion,
         query_fields=fields or DEFAULT_SEARCH_FIELDS,
         conjunction_by_default=args.lse_conjunction == "and",
+        include_spans=not args.lse_rank_only,
     )
 
 
@@ -553,7 +592,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     lse_options = search_options_from_args(args)
     repeat = max(args.repeat, 1)
     try:
-        docs, queries, qrels = load_dataset(args.dataset, args.cache_dir, args.qrels_split)
+        docs, queries, qrels = load_dataset(
+            args.dataset,
+            args.cache_dir,
+            args.qrels_split,
+            sample_docs=max(args.sample_docs, 0),
+            sample_queries=max(args.sample_queries, 0),
+            seed=args.seed,
+        )
     except (FileNotFoundError, RuntimeError, ValueError, OSError) as error:
         print(f"dataset error: {error}", file=sys.stderr)
         return 2
@@ -566,6 +612,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     print(f"dataset={args.dataset} split={args.qrels_split} docs={len(docs)} "
           f"queries={len(selected_queries)} qrels_queries={len(qrels)} "
           f"top_k={args.top_k} repeat={repeat}")
+    if args.sample_docs > 0 or args.sample_queries > 0:
+        print(
+            f"sampling seed={args.seed} requested_docs={args.sample_docs} "
+            f"requested_queries={args.sample_queries}"
+        )
 
     retriever_names = [name.strip() for name in args.baselines.split(",") if name.strip()]
     runs: dict[str, list[dict[str, Any]]] = {}
@@ -610,6 +661,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 results[name],
                 metric=args.bootstrap_metric,
                 samples=args.bootstrap_samples,
+                seed=args.seed,
             )
 
     print("")
@@ -645,6 +697,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         "top_k": args.top_k,
         "repeat": repeat,
         "deterministic_index": bool(args.deterministic_index),
+        "sampling": {
+            "requested_docs": max(args.sample_docs, 0),
+            "requested_queries": max(args.sample_queries, 0),
+            "seed": args.seed,
+        },
         "lse_options": {
             "query_mode": lse_options.query_mode,
             "natural_query": lse_options.natural_query,
@@ -652,6 +709,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             "concept_expansion": lse_options.concept_expansion,
             "query_fields": list(lse_options.query_fields),
             "conjunction_by_default": lse_options.conjunction_by_default,
+            "include_spans": lse_options.include_spans,
+            "rank_only": not lse_options.include_spans,
         },
         "meta": {
             "platform": platform.platform(),
@@ -717,14 +776,23 @@ def ensure_coir_dataset(dataset: str, cache_dir: Path, split: str = "test") -> t
     return corpus_path, queries_path, qrels_path
 
 
-def _read_parquet(path: Path):
+def _parquet_file(path: Path):
     try:
         import pyarrow.parquet as parquet
     except ImportError as error:
         raise RuntimeError(
             "pyarrow is required for CoIR datasets; run with: uv run --extra eval python ..."
         ) from error
-    return parquet.read_table(str(path))
+    return parquet.ParquetFile(str(path))
+
+
+def _iter_parquet_batches(path: Path, batch_size: int = 5000):
+    """流式迭代 parquet batch，避免把 280k 文档一次性拉进内存。"""
+    yield from _parquet_file(path).iter_batches(batch_size=batch_size)
+
+
+def _read_parquet(path: Path):
+    return _parquet_file(path).read()
 
 
 def _read_coir_qrels(qrels_path: Path) -> dict[str, dict[str, float]]:
@@ -737,37 +805,162 @@ def _read_coir_qrels(qrels_path: Path) -> dict[str, dict[str, float]]:
     return qrels
 
 
+def select_sampled_query_ids(
+    qrels: dict[str, dict[str, float]], sample_queries: int, seed: int
+) -> list[str]:
+    """按固定种子从 qrels 中选择 query，并返回稳定排序后的 id 列表。"""
+    query_ids = sorted(qrels)
+    if sample_queries <= 0 or sample_queries >= len(query_ids):
+        return query_ids
+    rng = random.Random(seed)
+    return sorted(rng.sample(query_ids, sample_queries))
+
+
+def _sample_relevant_doc_ids(
+    qrels: dict[str, dict[str, float]], query_ids: Sequence[str]
+) -> set[str]:
+    relevant: set[str] = set()
+    for query_id in query_ids:
+        relevant.update(qrels.get(query_id, {}))
+    return relevant
+
+
+def sample_coir_docs(
+    corpus_path: Path,
+    relevant_ids: set[str],
+    sample_docs: int,
+    seed: int,
+    batch_size: int = 5000,
+) -> list[EvalDoc]:
+    """流式扫描 corpus：保留全部相关文档，再 reservoir 抽样 negative 文档。
+
+    保留相关文档是采样质量的关键：如果完全随机抽 20k 文档，会有部分
+    qrels 正例不在样本中，从而低估所有 baseline。输出按 corpus 原始顺序
+    排列，保证索引构建与并列排序可复现。
+    """
+    if sample_docs <= 0:
+        raise ValueError("--sample-docs 必须大于 0 才能启用流式 CoIR 采样")
+    if len(relevant_ids) > sample_docs:
+        raise ValueError(
+            f"sample-docs={sample_docs} 小于选中 query 的相关文档数 "
+            f"{len(relevant_ids)}，无法保留全部正例"
+        )
+
+    negative_target = sample_docs - len(relevant_ids)
+    rng = random.Random(seed)
+    collected: dict[int, EvalDoc] = {}
+    reservoir: list[tuple[int, EvalDoc]] = []
+    missing_relevant = set(relevant_ids)
+    negative_seen = 0
+    position = 0
+
+    for batch in _iter_parquet_batches(corpus_path, batch_size):
+        for row in batch.to_pylist():
+            doc_id = str(row.get("_id", ""))
+            if not doc_id:
+                position += 1
+                continue
+            doc = EvalDoc(
+                doc_id=doc_id,
+                title=str(row.get("title") or ""),
+                text=str(row.get("text") or ""),
+            )
+            if doc_id in relevant_ids:
+                collected[position] = doc
+                missing_relevant.discard(doc_id)
+            elif negative_target > 0:
+                negative_seen += 1
+                if len(reservoir) < negative_target:
+                    reservoir.append((position, doc))
+                else:
+                    swap_index = rng.randrange(negative_seen)
+                    if swap_index < negative_target:
+                        reservoir[swap_index] = (position, doc)
+            position += 1
+
+    if missing_relevant:
+        preview = ", ".join(sorted(missing_relevant)[:5])
+        raise ValueError(f"{len(missing_relevant)} 个相关文档不在 corpus 中: {preview}")
+
+    collected.update(reservoir)
+    return [doc for _position, doc in sorted(collected.items())]
+
+
+def load_coir_sampled_queries(
+    queries_path: Path,
+    query_ids: Sequence[str],
+    batch_size: int = 5000,
+) -> dict[str, str]:
+    """流式扫描 queries parquet，只保留选中 qid 的查询文本。"""
+    selected = set(query_ids)
+    loaded: dict[str, str] = {}
+    for batch in _iter_parquet_batches(queries_path, batch_size):
+        for row in batch.to_pylist():
+            query_id = str(row.get("_id", ""))
+            if query_id in selected:
+                loaded[query_id] = str(row.get("text") or "")
+    missing = selected - set(loaded)
+    if missing:
+        preview = ", ".join(sorted(missing)[:5])
+        raise ValueError(f"{len(missing)} 个选中 query 不在 queries parquet 中: {preview}")
+    return {query_id: loaded[query_id] for query_id in query_ids}
+
+
 def load_coir_dataset(
     corpus_path: Path,
     queries_path: Path,
     qrels_path: Path,
     extra_qrels_paths: Sequence[Path] = (),
+    sample_docs: int = 0,
+    sample_queries: int = 0,
+    seed: int = 42,
 ):
-    corpus_rows = _read_parquet(corpus_path).to_pylist()
-    query_rows = _read_parquet(queries_path).to_pylist()
-
-    docs = [
-        EvalDoc(
-            doc_id=str(row["_id"]),
-            title=str(row.get("title") or ""),
-            text=str(row.get("text") or ""),
-        )
-        for row in corpus_rows
-    ]
-    queries = {
-        str(row["_id"]): str(row.get("text") or "")
-        for row in query_rows
-    }
-
     qrels: dict[str, dict[str, float]] = {}
     for path in (qrels_path, *extra_qrels_paths):
         for query_id, labels in _read_coir_qrels(path).items():
             qrels.setdefault(query_id, {}).update(labels)
-    return docs, queries, qrels
+
+    if sample_docs <= 0 and sample_queries <= 0:
+        corpus_rows = _read_parquet(corpus_path).to_pylist()
+        query_rows = _read_parquet(queries_path).to_pylist()
+        docs = [
+            EvalDoc(
+                doc_id=str(row["_id"]),
+                title=str(row.get("title") or ""),
+                text=str(row.get("text") or ""),
+            )
+            for row in corpus_rows
+        ]
+        queries = {str(row["_id"]): str(row.get("text") or "") for row in query_rows}
+        return docs, queries, qrels
+
+    if sample_docs <= 0:
+        raise ValueError(
+            "CoIR 采样需要同时指定 --sample-docs > 0；"
+            "仅采样 query 仍需全量 corpus，会放大内存与小文件开销"
+        )
+
+    selected_query_ids = select_sampled_query_ids(qrels, sample_queries, seed)
+    if not selected_query_ids:
+        raise ValueError(f"qrels 为空，无法采样: {qrels_path}")
+    relevant_ids = _sample_relevant_doc_ids(qrels, selected_query_ids)
+    docs = sample_coir_docs(corpus_path, relevant_ids, sample_docs, seed)
+    queries = load_coir_sampled_queries(queries_path, selected_query_ids)
+    sampled_qrels = {query_id: qrels[query_id] for query_id in selected_query_ids}
+    return docs, queries, sampled_qrels
 
 
-def load_dataset(dataset: str, cache_dir: Path, qrels_split: str = "test"):
+def load_dataset(
+    dataset: str,
+    cache_dir: Path,
+    qrels_split: str = "test",
+    sample_docs: int = 0,
+    sample_queries: int = 0,
+    seed: int = 42,
+):
     if dataset in BEIR_DATASETS:
+        if sample_docs > 0 or sample_queries > 0:
+            raise ValueError("固定种子采样目前只支持 CoIR 数据集（含 CodeSearchNet）")
         root = ensure_beir_dataset(dataset, cache_dir)
         return load_beir_corpus(root), load_beir_queries(root), load_beir_qrels(root, qrels_split)
     if dataset in COIR_DATASETS:
@@ -777,9 +970,24 @@ def load_dataset(dataset: str, cache_dir: Path, qrels_split: str = "test"):
                 ensure_coir_dataset(dataset, cache_dir, split)[2]
                 for split in ("test", "valid", "train")
             ]
-            return load_coir_dataset(corpus_path, queries_path, qrels_paths[0], qrels_paths[1:])
+            return load_coir_dataset(
+                corpus_path,
+                queries_path,
+                qrels_paths[0],
+                qrels_paths[1:],
+                sample_docs=sample_docs,
+                sample_queries=sample_queries,
+                seed=seed,
+            )
         _, _, qrels_path = ensure_coir_dataset(dataset, cache_dir, qrels_split)
-        return load_coir_dataset(corpus_path, queries_path, qrels_path)
+        return load_coir_dataset(
+            corpus_path,
+            queries_path,
+            qrels_path,
+            sample_docs=sample_docs,
+            sample_queries=sample_queries,
+            seed=seed,
+        )
     supported = sorted(BEIR_DATASETS | COIR_DATASETS)
     raise ValueError(f"unsupported dataset: {dataset}; choose one of {supported}")
 if __name__ == "__main__":

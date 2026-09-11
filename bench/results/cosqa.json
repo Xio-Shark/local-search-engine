@@ -6,6 +6,11 @@
   "top_k": 100,
   "repeat": 1,
   "deterministic_index": true,
+  "sampling": {
+    "requested_docs": 0,
+    "requested_queries": 0,
+    "seed": 42
+  },
   "lse_options": {
     "query_mode": "auto",
     "natural_query": null,
@@ -16,7 +21,9 @@
       "filename",
       "path"
     ],
-    "conjunction_by_default": true
+    "conjunction_by_default": true,
+    "include_spans": true,
+    "rank_only": false
   },
   "meta": {
     "platform": "macOS-26.5.1-arm64-arm-64bit",
@@ -27,12 +34,12 @@
   "significance": {
     "lse_vs_tantivy": {
       "queries": 500.0,
-      "mean_diff": 0.0031183570982186116,
-      "ci_low": -0.00813544736947104,
-      "ci_high": 0.014231838704700565,
-      "wins": 29,
+      "mean_diff": 0.0024516904315519446,
+      "ci_low": -0.00865967731247859,
+      "ci_high": 0.01357382441160848,
+      "wins": 28,
       "losses": 26,
-      "ties": 445,
+      "ties": 446,
       "samples": 5000.0,
       "metric": "ndcg@10"
     },
@@ -54,24 +61,24 @@
       "ndcg@10": 0.15054605049076744,
       "recall@10": 0.298,
       "mrr@10": 0.10726984126984142,
-      "total_seconds": 6.1017747502774,
-      "p50_ms": 11.776499915868044
+      "total_seconds": 5.426093707792461,
+      "p50_ms": 10.630416218191385
     },
     "tantivy": {
       "queries": 500.0,
-      "ndcg@10": 0.14742769339254885,
-      "recall@10": 0.288,
-      "mrr@10": 0.1059809523809525,
-      "total_seconds": 0.08419329207390547,
-      "p50_ms": 0.15916628763079643
+      "ndcg@10": 0.14809436005921553,
+      "recall@10": 0.29,
+      "mrr@10": 0.10626666666666679,
+      "total_seconds": 0.07042445801198483,
+      "p50_ms": 0.1332922838628292
     },
     "ripgrep": {
       "queries": 500.0,
       "ndcg@10": 0.018537440915403814,
       "recall@10": 0.04,
       "mrr@10": 0.012099999999999996,
-      "total_seconds": 197.41220766678452,
-      "p50_ms": 388.1832081824541
+      "total_seconds": 164.46590666705742,
+      "p50_ms": 312.1107080951333
     }
   }
 }

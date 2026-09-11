@@ -6,7 +6,8 @@
 - 📦 **意图到上下文胶囊 (lse pack)**：搜索即 Prompt！按自然语言意图秒级定位核心语法块，就地自动吸附其内部调用的 1-hop 依赖符号声明（类/函数接口），在严格 Token 预算内压缩并一键注入剪贴板（`Cmd+V` 直达 AI）
 - 🔤 **词级多流倒排索引 (Word-level BM25)**：代码标识符（驼峰/蛇形/类路径）解离 + Jieba CJK 词级多粒度展开真正写入倒排索引，彻底解决纯字元 `ngram(1,2)` 导致的 IDF 统计失效与排序失真
 - 💾 **零存储（Zero-Storage）本地架构**：Tantivy 仅作为倒排与排序器，不存压缩正文副本，命中后零拷贝直读磁盘，索引体积显著缩减
-- 🛡️ **自适应查询语义与语法自愈**：短关键词查询保持结构化 AND 精度；长句 / claim 自动切换为与索引侧同分词器对齐、按 BM25 IDF 软加权的 OR。字段过滤、显式布尔、短语、排序等结构化语法仍走 AST。自动补齐未闭合括号、修剪悬挂操作符，杜绝脱靶与崩溃
+- 🛡️ **自适应查询语义与语法自愈**：短关键词查询保持结构化 AND 精度；长句 / claim 自动切换为与索引侧同分词器对齐、按 BM25 IDF 软加权的 OR。代码片段会绕过 Query DSL 判定，避免字符串引号 / dict `name:` 被误解析。字段过滤、显式布尔、短语、排序等结构化语法仍走 AST。自动补齐未闭合括号、修剪悬挂操作符，杜绝脱靶与崩溃
+- ⚡ **rank-only 预筛模式**：`SearchOptions(include_spans=False)` 只返回排序元数据（`path/filename/extension/size/mtime/score`），不读正文、不算 evidence span，为 Agent 预筛与 rerank 召回提供与原生 BM25 同口径的延迟
 - ⚡ **单趟流式 IO 与极速增量**：一次读取同时完成 BLAKE2b 哈希与文本解码；增量更新对未修改文件毫秒级短路，零无意义哈希重读
 - 💻 **极简轻量**：纯 CLI，零后台常驻守护，跨平台二进制打包发布
 
@@ -129,24 +130,38 @@ uv run python bench/bench_public.py \
 uv run --extra eval python bench/bench_public.py \
   --dataset cosqa --baselines lse,tantivy,ripgrep \
   --deterministic-index --bootstrap-samples 5000
+
+# CodeSearchNet-Python 固定种子采样：20k docs / 2k queries
+uv run --extra eval python bench/bench_public.py \
+  --dataset codesearchnet-python \
+  --sample-docs 20000 --sample-queries 2000 --seed 42 \
+  --baselines lse,tantivy \
+  --deterministic-index --repeat 3 --bootstrap-samples 5000
 ```
 
-| 数据集 / split | Baseline | nDCG@10 | Recall@10 | MRR@10 | p50 latency |
-| :--- | :--- | ---: | ---: | ---: | ---: |
-| SciFact test (300 q) | **lse（默认）** | **0.6492** | **0.7955** | **0.6074** | 20.3 ms |
-| SciFact test (300 q) | native Tantivy BM25 | 0.6199 | 0.7474 | 0.5852 | 0.17 ms |
-| SciFact test (300 q) | ripgrep term-count | 0.0477 | 0.1025 | 0.0311 | 82.4 ms |
-| CosQA test (500 q) | **lse（默认）** | **0.1505** | 0.2980 | **0.1073** | 11.8 ms |
-| CosQA test (500 q) | native Tantivy BM25 | 0.1474 | 0.2880 | 0.1060 | 0.16 ms |
-| CosQA test (500 q) | ripgrep term-count | 0.0185 | 0.0400 | 0.0121 | 388.2 ms |
+| 数据集 / split | Baseline | nDCG@10 | Recall@10 | MRR@10 | full p50 | rank-only p50 |
+| :--- | :--- | ---: | ---: | ---: | ---: | ---: |
+| SciFact test (300 q) | **lse（默认）** | **0.6492** | **0.7955** | **0.6074** | 20.07 ms | 0.70 ms |
+| SciFact test (300 q) | native Tantivy BM25 | 0.6232 | 0.7508 | 0.5886 | 0.15 ms | 0.15 ms |
+| SciFact test (300 q) | ripgrep term-count | 0.0477 | 0.1025 | 0.0311 | 73.49 ms | — |
+| CosQA test (500 q) | **lse（默认）** | **0.1505** | 0.2980 | **0.1073** | 10.63 ms | 0.70 ms |
+| CosQA test (500 q) | native Tantivy BM25 | 0.1481 | 0.2900 | 0.1063 | 0.13 ms | 0.13 ms |
+| CodeSearchNet-Python sample (2,000 q) | lse（默认） | 0.9451 | **0.9805** | 0.9336 | 32.14 ms | 1.13 ms |
+| CodeSearchNet-Python sample (2,000 q) | native Tantivy BM25 | **0.9453** | 0.9750 | **0.9355** | 0.47 ms | 0.47 ms |
 
-- **SciFact**：lse 相比原生 BM25 nDCG@10 **+0.0293**，paired bootstrap
-  95% CI [+0.0042, +0.0553]；相比上一版 lse（0.5682）提升 **+0.0810**。
-- **CosQA**：lse 相比原生 BM25 nDCG@10 **+0.0031**，但 95% CI
-  [-0.0081, +0.0142] 跨 0，**不能宣称统计显著超越**；代码检索场景仍需要
-  CodeSearchNet 等更大评测集验证。
-- lse 的 p50 包含命中后正文读取与 evidence span 计算，并非纯倒排排序耗时；
-  纯 compile + parse + rank p50 实测约 0.14 ms，与原生 BM25 同口径。
+- **SciFact**：lse 相比原生 BM25 nDCG@10 **+0.0260**，paired bootstrap
+  95% CI [+0.0006, +0.0518]，仍为小但显著的提升；相比上一版 lse（0.5682）
+  提升 **+0.0810**。
+- **CosQA**：lse 相比原生 BM25 nDCG@10 **+0.0025**，95% CI
+  [-0.0087, +0.0136] 跨 0，**不能宣称统计显著超越**。
+- **CodeSearchNet-Python 采样**：lse vs native BM25 mean diff **-0.0002**，
+  95% CI [-0.0059, +0.0056] 跨 0；代码检索结论为“持平/未确认”，
+  **不能宣称 lse 在代码检索上领先**。下一步先查 tokenizer / IDF /
+  字段权重，而不是直接上 reranker 或向量检索。
+- `SearchOptions(include_spans=False)` 提供明确拆分的 rank-only 口径：
+  三个数据集上排序结果 / nDCG 与 full 模式完全相同，rank-only p50 为
+  0.70 / 0.70 / 1.13 ms；full p50 则包含正文读取与 evidence span 切片，
+  是 Agent 拿上下文时的真实成本。
 
 完整消融、缓存 / 延迟对比、统计方法、复现命令与原始 JSON 见
 [bench/PUBLIC_EVAL.md](bench/PUBLIC_EVAL.md)。
@@ -158,14 +173,22 @@ uv run --extra eval python bench/bench_public.py \
 `lse` 原生支持作为本地 RAG 系统的 BM25 预筛器：
 
 ```python
+from lse.options import SearchOptions
 from lse.searcher import SearchEngine
 
 engine = SearchEngine(index_dir)
-result = engine.search("架构设计", limit=50)
 
-# 获取命中文件集合与连续证据段
+# Agent 预筛 / rerank 召回：只排序，不读正文、不算 evidence span
+screened = engine.search(
+    "架构设计",
+    limit=50,
+    options=SearchOptions(include_spans=False),
+)
+print([(hit.path, hit.score) for hit in screened.hits])
+
+# 需要给 LLM 上下文时再用 full 模式取证据段
+result = engine.search("架构设计", limit=10)
 for hit in result.hits:
-    print(hit.path, hit.score)
     for span in hit.spans:
         print(f"[{span.start_line}-{span.end_line}] {span.breadcrumbs}: {span.text}")
 ```
@@ -209,8 +232,8 @@ lse/
 ├── discovery.py      # 目录递归发现与文本文件识别
 ├── schema.py         # Tantivy 索引 Schema（Zero-Storage + 词级分词注册）
 ├── indexer.py        # 全量/增量/重建索引（单趟流式 IO + BLAKE2b 原子状态）
-├── options.py        # SearchOptions（auto/natural/structured、IDF 权重、字段选择）
-├── searcher.py       # 统一检索入口（自然查询重写 + 语法自愈 + 零拷贝磁盘读取 + 证据提取）
+├── options.py        # SearchOptions（auto/natural/structured、IDF 权重、字段选择、include_spans）
+├── searcher.py       # 统一检索入口（自然查询重写 + 代码片段识别 + rank-only 快速路径 + 证据提取）
 ├── packer.py         # 🎯 意图到上下文胶囊打包器（AST 闭包 + 1-hop 依赖吸附 + 预算控制 + 剪贴板）
 ├── tokenizer.py      # 代码与 CJK 词级多流分词体系（Jieba 词级切词 + 驼峰解离）
 ├── query_ast.py      # 查询词法分析器与括号平衡自愈编译器
@@ -229,5 +252,5 @@ lse/
 ```bash
 uv run pytest tests/
 ```
-60 例核心单元测试 100% 通过（涵盖分词解离、语法自愈、多层符号感知、静态导入依赖解析、同文件 Intra-file 反查、单趟哈希短路、零存储检索、版本号检索、ContextPacker 依赖解析、Token 预算压包、多语言接口存根化、双向概念投影、Rust/Go 静态导入、相邻跨度融合与剪贴板容错）。
+65 例核心单元测试 100% 通过（涵盖分词解离、语法自愈、多层符号感知、静态导入依赖解析、同文件 Intra-file 反查、单趟哈希短路、零存储检索、版本号检索、ContextPacker 依赖解析、Token 预算压包、多语言接口存根化、双向概念投影、Rust/Go 静态导入、相邻跨度融合与剪贴板容错）。
 
