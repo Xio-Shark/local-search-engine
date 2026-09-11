@@ -137,14 +137,20 @@ uv run --extra eval python bench/bench_public.py \
   --sample-docs 20000 --sample-queries 2000 --seed 42 \
   --baselines lse,tantivy \
   --deterministic-index --repeat 3 --bootstrap-samples 5000
+
+# BEIR 泛化补跑
+for ds in nfcorpus fiqa arguana; do
+  uv run python bench/bench_public.py --dataset "$ds" --baselines lse,tantivy \
+    --deterministic-index --bootstrap-samples 5000
+done
 ```
 
 | 数据集 / split | Baseline | nDCG@10 | Recall@10 | MRR@10 | full p50 | rank-only p50 |
 | :--- | :--- | ---: | ---: | ---: | ---: | ---: |
-| SciFact test (300 q) | **lse（默认）** | **0.6492** | **0.7955** | **0.6074** | 20.07 ms | 0.70 ms |
+| SciFact test (300 q) | **lse（默认）** | **0.6492** | **0.7955** | **0.6074** | 19.99 ms | 0.86 ms |
 | SciFact test (300 q) | native Tantivy BM25 | 0.6232 | 0.7508 | 0.5886 | 0.15 ms | 0.15 ms |
-| SciFact test (300 q) | ripgrep term-count | 0.0477 | 0.1025 | 0.0311 | 73.49 ms | — |
-| CosQA test (500 q) | **lse（默认）** | **0.1505** | 0.2980 | **0.1073** | 10.63 ms | 0.70 ms |
+| SciFact test (300 q) | ripgrep term-count | 0.0477 | 0.1025 | 0.0311 | 84.32 ms | — |
+| CosQA test (500 q) | **lse（默认）** | **0.1505** | 0.2980 | **0.1073** | 10.93 ms | 0.90 ms |
 | CosQA test (500 q) | native Tantivy BM25 | 0.1481 | 0.2900 | 0.1063 | 0.13 ms | 0.13 ms |
 | CodeSearchNet-Python sample (2,000 q) | lse（默认） | 0.9451 | **0.9805** | 0.9336 | 32.14 ms | 1.13 ms |
 | CodeSearchNet-Python sample (2,000 q) | native Tantivy BM25 | **0.9453** | 0.9750 | **0.9355** | 0.47 ms | 0.47 ms |
@@ -160,8 +166,24 @@ uv run --extra eval python bench/bench_public.py \
   字段权重，而不是直接上 reranker 或向量检索。
 - `SearchOptions(include_spans=False)` 提供明确拆分的 rank-only 口径：
   三个数据集上排序结果 / nDCG 与 full 模式完全相同，rank-only p50 为
-  0.70 / 0.70 / 1.13 ms；full p50 则包含正文读取与 evidence span 切片，
+  0.86 / 0.90 / 1.13 ms；full p50 则包含正文读取与 evidence span 切片，
   是 Agent 拿上下文时的真实成本。
+
+**BEIR 泛化补跑（默认 auto + IDF^0.25）**：
+
+| 数据集（test） | lse nDCG@10 | native BM25 | mean diff | 95% CI |
+| :--- | ---: | ---: | ---: | ---: |
+| NFCorpus（323 q） | 0.2884 | **0.2994** | -0.0110 | [-0.0232, +0.0010] |
+| FiQA（648 q） | 0.2283 | **0.2336** | -0.0054 | [-0.0138, +0.0026] |
+| Arguana（1,406 q） | 0.3097 | **0.3152** | -0.0055 | [-0.0122, +0.0009] |
+
+三条 CI 均跨 0，不能判定显著劣化，但点估计全为负，也没有出现 SciFact
+的正 gap。`IDF^0.25 + auto` 不能外推为通用最优；NFCorpus 用
+`--lse-query-mode natural` 后 nDCG@10 = **0.3061**，反超 native BM25 的
+0.2994（mean diff **+0.0067**，95% CI [-0.0022, +0.0160]，仍跨 0），
+说明短查询 auto AND 阈值是下一步最值得验证的方向。**Phase C1 未达到
+“多数数据集不劣于 native BM25”的验收线，当前不能 bump 0.3.0 / 打 tag /
+进入 tree-sitter 或 reranker 投资。**
 
 完整消融、缓存 / 延迟对比、统计方法、复现命令与原始 JSON 见
 [bench/PUBLIC_EVAL.md](bench/PUBLIC_EVAL.md)。
@@ -252,5 +274,5 @@ lse/
 ```bash
 uv run pytest tests/
 ```
-65 例核心单元测试 100% 通过（涵盖分词解离、语法自愈、多层符号感知、静态导入依赖解析、同文件 Intra-file 反查、单趟哈希短路、零存储检索、版本号检索、ContextPacker 依赖解析、Token 预算压包、多语言接口存根化、双向概念投影、Rust/Go 静态导入、相邻跨度融合与剪贴板容错）。
+66 例核心单元测试 100% 通过（涵盖分词解离、语法自愈、多层符号感知、静态导入依赖解析、同文件 Intra-file 反查、单趟哈希短路、零存储检索、版本号检索、ContextPacker 依赖解析、Token 预算压包、多语言接口存根化、双向概念投影、Rust/Go 静态导入、相邻跨度融合与剪贴板容错）。
 

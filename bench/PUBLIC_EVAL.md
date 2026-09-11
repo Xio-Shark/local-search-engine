@@ -108,9 +108,9 @@ uv run python bench/bench_public.py \
 
 | Baseline | nDCG@10 | Recall@10 | MRR@10 | p50 latency | total time |
 | :--- | ---: | ---: | ---: | ---: | ---: |
-| **lse（默认）** | **0.6492** | **0.7955** | **0.6074** | 20.07 ms | 6.41 s |
-| native Tantivy BM25 | 0.6232 | 0.7508 | 0.5886 | 0.15 ms | 0.05 s |
-| ripgrep term-count | 0.0477 | 0.1025 | 0.0311 | 73.49 ms | 22.06 s |
+| **lse（默认）** | **0.6492** | **0.7955** | **0.6074** | 19.99 ms | 6.35 s |
+| native Tantivy BM25 | 0.6232 | 0.7508 | 0.5886 | 0.16 ms | 0.05 s |
+| ripgrep term-count | 0.0477 | 0.1025 | 0.0311 | 84.32 ms | 25.18 s |
 
 paired bootstrap（nDCG@10，5000 次重采样）：
 
@@ -133,9 +133,9 @@ uv run --extra eval python bench/bench_public.py \
 
 | Baseline | nDCG@10 | Recall@10 | MRR@10 | p50 latency | total time |
 | :--- | ---: | ---: | ---: | ---: | ---: |
-| **lse（默认）** | **0.1505** | 0.2980 | **0.1073** | 10.63 ms | 5.43 s |
+| **lse（默认）** | **0.1505** | 0.2980 | **0.1073** | 10.93 ms | 5.67 s |
 | native Tantivy BM25 | 0.1481 | 0.2900 | 0.1063 | 0.13 ms | 0.07 s |
-| ripgrep term-count | 0.0185 | 0.0400 | 0.0121 | 312.11 ms | 164.47 s |
+| ripgrep term-count | 0.0185 | 0.0400 | 0.0121 | 396.56 ms | 200.52 s |
 
 paired bootstrap（nDCG@10，5000 次重采样）：
 
@@ -182,6 +182,56 @@ paired bootstrap（nDCG@10，5000 次重采样）：
 宣称 lse 在代码检索上领先**；后续应先查 tokenizer / IDF / 字段权重，
 而不是直接上 reranker / 向量检索。真实代码检索的结论仍是“未确认”。
 
+### 3.4 泛化验证：NFCorpus / FiQA / Arguana
+
+```bash
+for ds in nfcorpus fiqa arguana; do
+  uv run python bench/bench_public.py --dataset "$ds" --baselines lse,tantivy \
+    --deterministic-index --bootstrap-samples 5000 \
+    --output-json "bench/results/$ds.json"
+done
+
+# NFCorpus 显式 natural profile；FiQA natural 作为补充诊断
+uv run python bench/bench_public.py --dataset nfcorpus --baselines lse,tantivy \
+  --lse-query-mode natural --deterministic-index --bootstrap-samples 5000 \
+  --output-json bench/results/nfcorpus-natural.json
+uv run python bench/bench_public.py --dataset fiqa --baselines lse,tantivy \
+  --lse-query-mode natural --deterministic-index --bootstrap-samples 5000 \
+  --output-json bench/results/fiqa-natural.json
+```
+
+| 数据集（test） | lse nDCG@10 | native BM25 | mean diff | 95% CI | W/L/T |
+| :--- | ---: | ---: | ---: | ---: | :--- |
+| NFCorpus（323 q） | 0.2884 | **0.2994** | -0.0110 | [-0.0232, +0.0010] | 72/87/164 |
+| FiQA（648 q） | 0.2283 | **0.2336** | -0.0054 | [-0.0138, +0.0026] | 95/103/450 |
+| Arguana（1,406 q） | 0.3097 | **0.3152** | -0.0055 | [-0.0122, +0.0009] | 255/301/850 |
+
+三条 CI 都跨 0，因此**不能判定 lse 显著劣于原生 BM25**；但三个点估计
+全部为负，也**没有出现 SciFact 上的正 gap**。这直接说明：`IDF^0.25`
+与 `query_mode=auto` 的组合不能从 SciFact 外推为通用最优，SciFact 的
++0.0260 更像数据集特定收益，而不是引擎的普遍优势。
+
+进一步定位：
+
+1. **短查询 auto AND 是明确缺口**。NFCorpus 用
+   `--lse-query-mode natural` 后 nDCG@10 = **0.3061**，反超原生 BM25 的
+   0.2994（mean diff **+0.0067**，95% CI [-0.0022, +0.0160]，仍跨 0）。
+   默认 auto 的短关键词 AND 策略在该数据集损失约 0.011 nDCG，说明并不是
+   BM25 打分本身弱，而是短查询连接语义需要按数据分布选择。
+2. **句中标点误判曾显著伤害 FiQA / Arguana**。修复前的 FiQA diff 为
+   -0.0125（CI 显著为负）、Arguana 为 -0.1310（CI 显著为负）。原因是
+   自然语言 claim 中的 `business:`、`environment:` 及句内引号被
+   `QueryCompiler` 误判为字段表达式 / 精确短语，从而退回结构化 AND AST。
+   现已改为“未知 prefix:value 与长句中的引号按自然语言标点处理”，
+   修复后两条 diff 均回到 CI 跨 0。
+3. **`IDF^0.25` 本身不是唯一问题**。关闭 IDF 或在自然模式下改变
+   IDF power，并未在这些数据集上出现系统性反转；不应把结论简单写成
+   “IDF^0.25 在 SciFact 过拟合后直接砍掉”。下一步需要的是按数据集 /
+   查询模式选择 profile，或把短查询 auto AND 改为经过 dev 验证的策略。
+
+**发布决策**：Phase C1 未达到“多数数据集上不劣于 native BM25”的
+验收线，当前不应 bump 0.3.0 或进入 tree-sitter / reranker 等新能力投资。
+
 ## 4. 延迟：概念图缓存（P0）、rank-only 与 evidence span 成本
 
 profiling（SciFact，`limit=10`）显示旧实现每个 query 都执行
@@ -195,8 +245,8 @@ profiling（SciFact，`limit=10`）显示旧实现每个 query 都执行
 | `load_project_concepts` | 8.8 ms/次 | 首次 1.2 ms，缓存命中 0.011 ms |
 | `search(limit=10)` p50（full） | 11.5 ms | **2.15 ms** |
 | `search(limit=100)` p50（full） | 29.0 ms | **19.9 ms** |
-| SciFact public full p50 | 29.2 ms | **20.07 ms** |
-| CosQA public full p50 | 74.4 ms | **10.63 ms** |
+| SciFact public full p50 | 29.2 ms | **19.99 ms** |
+| CosQA public full p50 | 74.4 ms | **10.93 ms** |
 | CodeSearchNet sample full p50 | — | **32.14 ms** |
 
 `SearchOptions.include_spans=False` 已实现 rank-only 模式：只读 stored
@@ -205,8 +255,8 @@ profiling（SciFact，`limit=10`）显示旧实现每个 query 都执行
 
 | 数据集 | lse full p50 | lse rank-only p50 | native BM25 p50 | nDCG 是否一致 |
 | :--- | ---: | ---: | ---: | :--- |
-| SciFact test | 20.07 ms | **0.70 ms** | 0.15 ms | 完全一致 (0.6492) |
-| CosQA test | 10.63 ms | **0.70 ms** | 0.13 ms | 完全一致 (0.1505) |
+| SciFact test | 19.99 ms | **0.86 ms** | 0.18 ms | 完全一致 (0.6492) |
+| CosQA test | 10.93 ms | **0.90 ms** | 0.15 ms | 完全一致 (0.1505) |
 | CodeSearchNet-Python 采样 | 32.14 ms | **1.13 ms** | 0.47 ms | 完全一致 (0.9451) |
 
 full p50 包含命中后读取正文、计算 evidence span / snippet，是 Agent 拿到
@@ -225,8 +275,9 @@ tokenizer / IDF 编译。
 2. **代码片段识别**：整段含换行或出现强代码声明形态时，忽略 Query DSL
    语法（Python 字符串引号、dict `name:`、类型标注等），直接按索引侧
    tokenizer 走自然语言 OR 路径。
-3. **结构化语法**（`ext:py`、`filename:...`、大写 `AND/OR/NOT`、引号短语、
-   `sort:...`、`*`）→ 走 AST 查询编译器，默认 AND。
+3. **结构化语法**（已知字段 `ext:py` / `filename:...`、整句精确引号短语、
+   大写 `AND/OR/NOT`、`sort:...`、`*`）→ 走 AST 查询编译器，默认 AND；
+   未知 `prefix:value` 与长句中的引号按自然语言标点处理。
 4. **CJK / 中西混排** → 保留分组语义，例如 `目录A` 编译为 `目录 AND a`。
 5. **rank-only 模式**：`SearchOptions(include_spans=False)` 只返回排序
    元数据，不读取正文 / 不计算 span，用于 Agent 预筛与公平延迟基准。
@@ -238,12 +289,20 @@ tokenizer / IDF 编译。
 
 ## 6. 已知边界
 
-1. CosQA 与 CodeSearchNet 采样上 lse 相对原生 BM25 均不显著（CI 跨 0）；
-   不能把 SciFact 的结论外推到代码检索，也不能宣称代码检索领先。
-2. rank-only p50 与原生 BM25 同量级，但 full p50 仍高一个数量级，因为
-   包含正文读取 + evidence span；排序本身已是亚毫秒到 1.1 ms。
-3. CodeSearchNet 目前只跑固定种子采样（20k docs / 2k queries），未跑全量
+1. 除 SciFact 外，CosQA、CodeSearchNet 采样、NFCorpus、FiQA、Arguana
+   上 lse 相对原生 BM25 的点估计均不为正；多数 CI 跨 0，不能宣称
+   通用或代码检索领先。
+2. `IDF^0.25 + query_mode=auto` 尚未证明可泛化；NFCorpus 上显式
+   `query_mode=natural` 即可从 -0.0110 回到持平，短查询 auto AND
+   阈值是下一步最值得验证的方向。
+3. 当前不能 bump 0.3.0 / 打 tag / 走 release workflow：Phase C1 的
+   “多数数据集不劣于 native BM25”前置条件未满足。条件性优化应优先
+   做 query profile / 短查询策略，而不是 title/BM25F、reranker 或
+   tree-sitter。
+4. CodeSearchNet 目前只跑固定种子采样（20k docs / 2k queries），未跑全量
    280,310 docs；如果后续需要全量，应继续使用流式 parquet + 采样，
    不能 materialize 28 万个小文件。
-4. tree-sitter 多语言符号解析尚未接入，符号闭包仍以正则 / AST 混合实现。
-5. evidence span 目前只用于展示，不参与排序；所有质量提升来自查询编译层。
+5. rank-only p50 与原生 BM25 同量级，但 full p50 仍高一个数量级，因为
+   包含正文读取 + evidence span；排序本身已是亚毫秒到 1.1 ms。
+6. tree-sitter 多语言符号解析尚未接入，符号闭包仍以正则 / AST 混合实现。
+   注意：在 C1 泛化问题解决前不应启动该投资。

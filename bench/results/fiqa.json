@@ -1,0 +1,65 @@
+{
+  "dataset": "fiqa",
+  "qrels_split": "test",
+  "docs": 57638,
+  "queries": 648,
+  "top_k": 100,
+  "repeat": 1,
+  "deterministic_index": true,
+  "sampling": {
+    "requested_docs": 0,
+    "requested_queries": 0,
+    "seed": 42
+  },
+  "lse_options": {
+    "query_mode": "auto",
+    "natural_query": null,
+    "idf_power": 0.25,
+    "concept_expansion": true,
+    "query_fields": [
+      "content",
+      "filename",
+      "path"
+    ],
+    "conjunction_by_default": true,
+    "include_spans": true,
+    "rank_only": false
+  },
+  "meta": {
+    "platform": "macOS-26.5.1-arm64-arm-64bit",
+    "python": "3.11.15",
+    "lse_version": "0.2.0",
+    "command": "bench/bench_public.py --dataset fiqa --baselines lse,tantivy --deterministic-index --bootstrap-samples 5000 --output-json bench/results/fiqa.json"
+  },
+  "significance": {
+    "lse_vs_tantivy": {
+      "queries": 648.0,
+      "mean_diff": -0.0053527416051747856,
+      "ci_low": -0.01382112570525951,
+      "ci_high": 0.002614831238851041,
+      "wins": 95,
+      "losses": 103,
+      "ties": 450,
+      "samples": 5000.0,
+      "metric": "ndcg@10"
+    }
+  },
+  "results": {
+    "lse": {
+      "queries": 648.0,
+      "ndcg@10": 0.22825470753544538,
+      "recall@10": 0.2920677573455352,
+      "mrr@10": 0.28016056731334493,
+      "total_seconds": 10.021966082975268,
+      "p50_ms": 14.472499955445528
+    },
+    "tantivy": {
+      "queries": 648.0,
+      "ndcg@10": 0.23360744914061998,
+      "recall@10": 0.2946592759092759,
+      "mrr@10": 0.2946851116990006,
+      "total_seconds": 0.44737170822918415,
+      "p50_ms": 0.6203330121934414
+    }
+  }
+}

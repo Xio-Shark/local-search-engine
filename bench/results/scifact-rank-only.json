@@ -29,18 +29,18 @@
     "platform": "macOS-26.5.1-arm64-arm-64bit",
     "python": "3.11.15",
     "lse_version": "0.2.0",
-    "command": "bench/bench_public.py --dataset scifact --baselines lse,tantivy --deterministic-index --repeat 3 --lse-rank-only --output-json bench/results/scifact-rank-only.json"
+    "command": "bench/bench_public.py --dataset scifact --baselines lse,tantivy --deterministic-index --repeat 3 --bootstrap-samples 5000 --lse-rank-only --output-json bench/results/scifact-rank-only.json"
   },
   "significance": {
     "lse_vs_tantivy": {
       "queries": 300.0,
       "mean_diff": 0.025976376214080575,
-      "ci_low": -0.00021845589263216596,
-      "ci_high": 0.051261074003651944,
+      "ci_low": 0.0006487664181922707,
+      "ci_high": 0.051822216473009254,
       "wins": 66,
       "losses": 51,
       "ties": 183,
-      "samples": 2000.0,
+      "samples": 5000.0,
       "metric": "ndcg@10"
     }
   },
@@ -50,16 +50,16 @@
       "ndcg@10": 0.6491806798767726,
       "recall@10": 0.7955,
       "mrr@10": 0.607398148148148,
-      "total_seconds": 0.2113283754636844,
-      "p50_ms": 0.6890418007969856,
+      "total_seconds": 0.2623301387454073,
+      "p50_ms": 0.8577078891297182,
       "runs": 3.0,
       "std": {
         "queries": 0.0,
         "ndcg@10": 0.0,
         "recall@10": 0.0,
         "mrr@10": 0.0,
-        "total_seconds": 0.002374370961086164,
-        "p50_ms": 0.007517640004708672
+        "total_seconds": 0.015279509753843176,
+        "p50_ms": 0.04270229728816835
       }
     },
     "tantivy": {
@@ -67,16 +67,16 @@
       "ndcg@10": 0.623204303662692,
       "recall@10": 0.7507777777777779,
       "mrr@10": 0.5885529100529102,
-      "total_seconds": 0.049536458061387144,
-      "p50_ms": 0.15404152994354567,
+      "total_seconds": 0.058001388950894274,
+      "p50_ms": 0.17970815921823183,
       "runs": 3.0,
       "std": {
         "queries": 0.0,
         "ndcg@10": 0.0,
         "recall@10": 0.0,
         "mrr@10": 0.0,
-        "total_seconds": 0.000619017984772361,
-        "p50_ms": 0.0009133349431222539
+        "total_seconds": 0.0032836965559587842,
+        "p50_ms": 0.009462337061740256
       }
     }
   }
