@@ -117,6 +117,59 @@ def test_auto_structured_max_terms_switch(tmp_path: Path) -> None:
         SearchOptions(auto_structured_max_terms=-1)
 
 
+def test_idf_power_length_segment(tmp_path: Path) -> None:
+    """长度分段 IDF：阈值以上换幂次，阈值以下与标量幂次逐位一致。"""
+    index_dir = _build_index(
+        tmp_path,
+        {
+            "both.txt": "alpha beta gamma delta epsilon",
+            "alpha.txt": "alpha only alpha",
+            "beta.txt": "beta gamma",
+        },
+    )
+    engine = SearchEngine(index_dir)
+    query = "alpha beta gamma delta epsilon"
+
+    scalar_high = engine.search(query, options=SearchOptions(idf_power=1.0))
+    scalar_low = engine.search(query, options=SearchOptions(idf_power=0.25))
+
+    # 阈值严格小于 query 长度 -> 走长 query 幂次，与标量 1.0 完全一致
+    long_rule = engine.search(
+        query,
+        options=SearchOptions(
+            idf_power=0.25, idf_power_long=1.0, idf_power_long_chars=len(query) - 1
+        ),
+    )
+    assert [hit.path for hit in long_rule.hits] == [hit.path for hit in scalar_high.hits]
+    assert [hit.score for hit in long_rule.hits] == pytest.approx(
+        [hit.score for hit in scalar_high.hits]
+    )
+
+    # 阈值等于 query 长度 -> 未超过，保持 0.25
+    short_rule = engine.search(
+        query,
+        options=SearchOptions(
+            idf_power=0.25, idf_power_long=1.0, idf_power_long_chars=len(query)
+        ),
+    )
+    assert [hit.score for hit in short_rule.hits] == pytest.approx(
+        [hit.score for hit in scalar_low.hits]
+    )
+
+
+def test_effective_idf_power_selection() -> None:
+    options = SearchOptions(idf_power=0.25, idf_power_long=1.0, idf_power_long_chars=10)
+    assert options.effective_idf_power("short") == 0.25
+    assert options.effective_idf_power("x" * 10) == 0.25
+    assert options.effective_idf_power("x" * 11) == 1.0
+
+    # 默认关闭长度分段：任何长度都用 idf_power
+    assert SearchOptions().effective_idf_power("x" * 5000) == 0.25
+
+    with pytest.raises(ValueError):
+        SearchOptions(idf_power_long_chars=-1)
+
+
 def test_query_fields_switch(tmp_path: Path) -> None:
     index_dir = _build_index(
         tmp_path,

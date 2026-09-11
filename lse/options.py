@@ -40,6 +40,10 @@ class SearchOptions:
             保留它用于兼容已有调用方与消融脚本。
         idf_power: 自然语言查询下每个词项的 BM25 IDF 权重指数；设 ``None``
             关闭词项加权。dev split 调参值为 0.25。
+        idf_power_long: 长 query 使用的 IDF 幂次；``None``（默认）表示不启用
+            长度分段，所有 query 都用 ``idf_power``。
+        idf_power_long_chars: 触发 ``idf_power_long`` 的 query 字符数下限
+            （严格大于该值才切换）。
         concept_expansion: 是否追加项目 / 基础概念图谱中的双向映射词项
             （仅扩展召回，自然查询与结构化查询均会生效）。
         query_fields: 传给 Tantivy query parser 的默认搜索字段。
@@ -53,6 +57,8 @@ class SearchOptions:
     natural_query: bool | None = None
     auto_structured_max_terms: int = DEFAULT_AUTO_STRUCTURED_MAX_TERMS
     idf_power: float | None = 0.25
+    idf_power_long: float | None = None
+    idf_power_long_chars: int = 160
     concept_expansion: bool = True
     query_fields: tuple[str, ...] = DEFAULT_SEARCH_FIELDS
     conjunction_by_default: bool = True
@@ -61,3 +67,11 @@ class SearchOptions:
     def __post_init__(self) -> None:
         if self.auto_structured_max_terms < 0:
             raise ValueError("auto_structured_max_terms must be >= 0")
+        if self.idf_power_long_chars < 0:
+            raise ValueError("idf_power_long_chars must be >= 0")
+
+    def effective_idf_power(self, query: str) -> float | None:
+        """返回该 query 实际使用的 IDF 幂次（长度分段未启用时等同 ``idf_power``）。"""
+        if self.idf_power_long is not None and len(query) > self.idf_power_long_chars:
+            return self.idf_power_long
+        return self.idf_power

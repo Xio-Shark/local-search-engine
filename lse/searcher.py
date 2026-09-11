@@ -86,7 +86,7 @@ class SearchEngine:
         #    结构化语法（字段/布尔/短语/括号/排序）继续走 AST 编译路径。
         natural_query: str | None = None
         if plain_terms:
-            natural_query = _build_natural_query(plain_terms, compiler, searcher, opts)
+            natural_query = _build_natural_query(plain_terms, query, compiler, searcher, opts)
 
         if natural_query is not None:
             effective_query = natural_query
@@ -408,6 +408,7 @@ def _should_use_natural_query(
 
 def _build_natural_query(
     terms: list[str],
+    raw_query: str,
     compiler: QueryCompiler,
     searcher,
     options: SearchOptions,
@@ -417,6 +418,8 @@ def _build_natural_query(
     查询词首先经过与索引侧相同的 ``tokenize_stream`` 分词；随后按 BM25 IDF
     计算词项权重（可关闭）。这样既避免了 query parser 默认分析器与索引
     analyzer 不一致造成的词项错配，也保留了“稀有词更重要”的排序先验。
+    IDF 幂次由 ``SearchOptions.effective_idf_power`` 按 query 长度选择，
+    未启用长度分段时就是 ``idf_power``。
 
     CJK 与中西混排词项仍走 ``QueryCompiler`` 的分组语义（例如 ``目录A``
     编译为 ``目录 AND a``），避免被拆成 OR 后把 ``目录B`` 一并召回。
@@ -424,6 +427,7 @@ def _build_natural_query(
     clauses: list[str] = []
     seen_tokens: set[str] = set()
     num_docs = max(int(searcher.num_docs), 1)
+    idf_power = options.effective_idf_power(raw_query)
 
     for term in terms:
         if _CJK_QUERY_RE.search(term):
@@ -441,7 +445,7 @@ def _build_natural_query(
                 continue
             seen_tokens.add(token)
             escaped = token.replace('"', '\\"')
-            boost = _term_idf_boost(searcher, token, num_docs, options.idf_power)
+            boost = _term_idf_boost(searcher, token, num_docs, idf_power)
             if boost is None:
                 clauses.append(f'"{escaped}"')
             else:
