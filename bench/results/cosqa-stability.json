@@ -4,7 +4,7 @@
   "docs": 20604,
   "queries": 500,
   "top_k": 100,
-  "repeat": 1,
+  "repeat": 3,
   "deterministic_index": true,
   "lse_options": {
     "query_mode": "auto",
@@ -22,7 +22,7 @@
     "platform": "macOS-26.5.1-arm64-arm-64bit",
     "python": "3.11.15",
     "lse_version": "0.2.0",
-    "command": "bench/bench_public.py --dataset cosqa --baselines lse,tantivy,ripgrep --deterministic-index --bootstrap-samples 5000 --output-json bench/results/cosqa.json"
+    "command": "bench/bench_public.py --dataset cosqa --baselines lse,tantivy --repeat 3 --deterministic-index --bootstrap-samples 5000 --output-json bench/results/cosqa-stability.json"
   },
   "significance": {
     "lse_vs_tantivy": {
@@ -35,17 +35,6 @@
       "ties": 445,
       "samples": 5000.0,
       "metric": "ndcg@10"
-    },
-    "lse_vs_ripgrep": {
-      "queries": 500.0,
-      "mean_diff": 0.13200860957536373,
-      "ci_low": 0.11009739983405675,
-      "ci_high": 0.1553915263537603,
-      "wins": 142,
-      "losses": 10,
-      "ties": 348,
-      "samples": 5000.0,
-      "metric": "ndcg@10"
     }
   },
   "results": {
@@ -54,24 +43,34 @@
       "ndcg@10": 0.15054605049076744,
       "recall@10": 0.298,
       "mrr@10": 0.10726984126984142,
-      "total_seconds": 6.1017747502774,
-      "p50_ms": 11.776499915868044
+      "total_seconds": 5.882194000141074,
+      "p50_ms": 11.089472100138664,
+      "runs": 3.0,
+      "std": {
+        "queries": 0.0,
+        "ndcg@10": 0.0,
+        "recall@10": 0.0,
+        "mrr@10": 0.0,
+        "total_seconds": 0.2032874956480999,
+        "p50_ms": 0.26483350186067267
+      }
     },
     "tantivy": {
       "queries": 500.0,
       "ndcg@10": 0.14742769339254885,
       "recall@10": 0.288,
       "mrr@10": 0.1059809523809525,
-      "total_seconds": 0.08419329207390547,
-      "p50_ms": 0.15916628763079643
-    },
-    "ripgrep": {
-      "queries": 500.0,
-      "ndcg@10": 0.018537440915403814,
-      "recall@10": 0.04,
-      "mrr@10": 0.012099999999999996,
-      "total_seconds": 197.41220766678452,
-      "p50_ms": 388.1832081824541
+      "total_seconds": 0.09216890313352148,
+      "p50_ms": 0.1545140209297339,
+      "runs": 3.0,
+      "std": {
+        "queries": 0.0,
+        "ndcg@10": 0.0,
+        "recall@10": 0.0,
+        "mrr@10": 0.0,
+        "total_seconds": 0.014973352028810954,
+        "p50_ms": 0.008228301816271906
+      }
     }
   }
 }

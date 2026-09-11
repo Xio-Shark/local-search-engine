@@ -4,8 +4,11 @@
   "docs": 5183,
   "queries": 809,
   "top_k": 100,
+  "repeat": 1,
+  "deterministic_index": true,
   "lse_options": {
-    "natural_query": true,
+    "query_mode": "auto",
+    "natural_query": null,
     "idf_power": 0.25,
     "concept_expansion": true,
     "query_fields": [
@@ -19,16 +22,17 @@
     "platform": "macOS-26.5.1-arm64-arm-64bit",
     "python": "3.11.15",
     "lse_version": "0.2.0",
-    "command": "bench/bench_public.py --dataset scifact --qrels-split train --baselines tantivy --output-json bench/results/scifact-train-tantivy.json"
+    "command": "bench/bench_public.py --dataset scifact --qrels-split train --baselines tantivy --deterministic-index --bootstrap-samples 0 --output-json bench/results/scifact-train-tantivy.json"
   },
+  "significance": {},
   "results": {
     "tantivy": {
       "queries": 809.0,
       "ndcg@10": 0.6279148493476666,
       "recall@10": 0.745962093119077,
       "mrr@10": 0.5981826475955029,
-      "total_seconds": 0.19712629169225693,
-      "p50_ms": 0.23475009948015213
+      "total_seconds": 0.1710765827447176,
+      "p50_ms": 0.20179105922579765
     }
   }
 }

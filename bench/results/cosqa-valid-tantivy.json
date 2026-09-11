@@ -4,8 +4,11 @@
   "docs": 20604,
   "queries": 500,
   "top_k": 100,
+  "repeat": 1,
+  "deterministic_index": true,
   "lse_options": {
-    "natural_query": true,
+    "query_mode": "auto",
+    "natural_query": null,
     "idf_power": 0.25,
     "concept_expansion": true,
     "query_fields": [
@@ -19,16 +22,17 @@
     "platform": "macOS-26.5.1-arm64-arm-64bit",
     "python": "3.11.15",
     "lse_version": "0.2.0",
-    "command": "bench/bench_public.py --dataset cosqa --qrels-split valid --baselines tantivy --output-json bench/results/cosqa-valid-tantivy.json"
+    "command": "bench/bench_public.py --dataset cosqa --qrels-split valid --baselines tantivy --deterministic-index --bootstrap-samples 0 --output-json bench/results/cosqa-valid-tantivy.json"
   },
+  "significance": {},
   "results": {
     "tantivy": {
       "queries": 500.0,
-      "ndcg@10": 0.15858185304970318,
-      "recall@10": 0.326,
-      "mrr@10": 0.10880158730158736,
-      "total_seconds": 0.1187197919934988,
-      "p50_ms": 0.22900011390447617
+      "ndcg@10": 0.14258614375160875,
+      "recall@10": 0.31,
+      "mrr@10": 0.09373650793650802,
+      "total_seconds": 0.07162816729396582,
+      "p50_ms": 0.13620778918266296
     }
   }
 }

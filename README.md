@@ -6,7 +6,7 @@
 - 📦 **意图到上下文胶囊 (lse pack)**：搜索即 Prompt！按自然语言意图秒级定位核心语法块，就地自动吸附其内部调用的 1-hop 依赖符号声明（类/函数接口），在严格 Token 预算内压缩并一键注入剪贴板（`Cmd+V` 直达 AI）
 - 🔤 **词级多流倒排索引 (Word-level BM25)**：代码标识符（驼峰/蛇形/类路径）解离 + Jieba CJK 词级多粒度展开真正写入倒排索引，彻底解决纯字元 `ngram(1,2)` 导致的 IDF 统计失效与排序失真
 - 💾 **零存储（Zero-Storage）本地架构**：Tantivy 仅作为倒排与排序器，不存压缩正文副本，命中后零拷贝直读磁盘，索引体积显著缩减
-- 🛡️ **自然语言加权 OR 与语法自愈**：纯词项自然语言查询与索引侧同分词器对齐，按 BM25 IDF 软加权后编译为 OR；字段过滤、布尔表达式、短语、排序等结构化语法仍走 AST + 默认 AND。自动补齐未闭合括号、修剪悬挂操作符，杜绝脱靶与崩溃
+- 🛡️ **自适应查询语义与语法自愈**：短关键词查询保持结构化 AND 精度；长句 / claim 自动切换为与索引侧同分词器对齐、按 BM25 IDF 软加权的 OR。字段过滤、显式布尔、短语、排序等结构化语法仍走 AST。自动补齐未闭合括号、修剪悬挂操作符，杜绝脱靶与崩溃
 - ⚡ **单趟流式 IO 与极速增量**：一次读取同时完成 BLAKE2b 哈希与文本解码；增量更新对未修改文件毫秒级短路，零无意义哈希重读
 - 💻 **极简轻量**：纯 CLI，零后台常驻守护，跨平台二进制打包发布
 
@@ -113,36 +113,43 @@ lse rebuild --yes /path/to/project
 已接入 BEIR / SciFact（5,183 篇摘要）与 CoIR / CosQA（20,604 条 Python 代码），
 对比 lse、原生 Tantivy BM25 与 ripgrep term-count。调参只在 dev split
 （SciFact `qrels/train.tsv` 809 条、CosQA `data/valid` 500 条）进行，
-test split 只用于最终报告。
+test split 只用于最终报告；最终结果使用 `--deterministic-index` 固定索引
+布局，并用 paired bootstrap 检查显著性。
 
 ```bash
 # dev 消融（SciFact / CosQA 二选一）
-uv run python bench/bench_ablation.py --dataset scifact --qrels-split train --include-tantivy
-uv run --extra eval python bench/bench_ablation.py --dataset cosqa --qrels-split valid
+uv run python bench/bench_ablation.py --dataset scifact --qrels-split train \
+  --include-tantivy --deterministic-index
 
-# 最终 test 报告
-uv run python bench/bench_public.py --dataset scifact --baselines lse,tantivy,ripgrep
-uv run --extra eval python bench/bench_public.py --dataset cosqa --baselines lse,tantivy,ripgrep
+# 最终 test 报告（含 paired bootstrap）
+uv run python bench/bench_public.py \
+  --dataset scifact --baselines lse,tantivy,ripgrep \
+  --deterministic-index --bootstrap-samples 5000
+
+uv run --extra eval python bench/bench_public.py \
+  --dataset cosqa --baselines lse,tantivy,ripgrep \
+  --deterministic-index --bootstrap-samples 5000
 ```
 
 | 数据集 / split | Baseline | nDCG@10 | Recall@10 | MRR@10 | p50 latency |
 | :--- | :--- | ---: | ---: | ---: | ---: |
-| SciFact test (300 q) | **lse（默认）** | **0.6492** | **0.7955** | **0.6074** | 29.2 ms |
-| SciFact test (300 q) | native Tantivy BM25 | 0.6199 | 0.7474 | 0.5852 | 0.16 ms |
+| SciFact test (300 q) | **lse（默认）** | **0.6492** | **0.7955** | **0.6074** | 20.3 ms |
+| SciFact test (300 q) | native Tantivy BM25 | 0.6199 | 0.7474 | 0.5852 | 0.17 ms |
 | SciFact test (300 q) | ripgrep term-count | 0.0477 | 0.1025 | 0.0311 | 82.4 ms |
-| CosQA test (500 q) | **lse（默认）** | **0.1700** | **0.3180** | **0.1260** | 74.4 ms |
-| CosQA test (500 q) | native Tantivy BM25 | 0.1578 | 0.3120 | 0.1115 | 0.17 ms |
-| CosQA test (500 q) | ripgrep term-count | 0.0185 | 0.0400 | 0.0121 | 417.9 ms |
+| CosQA test (500 q) | **lse（默认）** | **0.1505** | 0.2980 | **0.1073** | 11.8 ms |
+| CosQA test (500 q) | native Tantivy BM25 | 0.1474 | 0.2880 | 0.1060 | 0.16 ms |
+| CosQA test (500 q) | ripgrep term-count | 0.0185 | 0.0400 | 0.0121 | 388.2 ms |
 
-SciFact 上 lse 相比原生 BM25 nDCG@10 提升 +0.0293（相对 +4.7%），
-CosQA 提升 +0.0122（相对 +7.7%）；相比上一版 lse（SciFact 0.5682、
-CosQA 0.1569）分别提升 +0.0810 / +0.0131。质量提升来自查询编译层：
-自然语言查询改用与索引对齐的分词 + IDF^0.25 加权 OR，结构化查询保持
-AST + 默认 AND。完整消融、复现命令、原始 JSON 与延迟归因见
+- **SciFact**：lse 相比原生 BM25 nDCG@10 **+0.0293**，paired bootstrap
+  95% CI [+0.0042, +0.0553]；相比上一版 lse（0.5682）提升 **+0.0810**。
+- **CosQA**：lse 相比原生 BM25 nDCG@10 **+0.0031**，但 95% CI
+  [-0.0081, +0.0142] 跨 0，**不能宣称统计显著超越**；代码检索场景仍需要
+  CodeSearchNet 等更大评测集验证。
+- lse 的 p50 包含命中后正文读取与 evidence span 计算，并非纯倒排排序耗时；
+  纯 compile + parse + rank p50 实测约 0.14 ms，与原生 BM25 同口径。
+
+完整消融、缓存 / 延迟对比、统计方法、复现命令与原始 JSON 见
 [bench/PUBLIC_EVAL.md](bench/PUBLIC_EVAL.md)。
-
-> lse 的 p50 延迟包含命中后正文读取与 evidence span 计算，并非纯倒排查询
-> 耗时；原生 BM25 baseline 只返回 doc id，两者不是同口径延迟对比。
 
 ---
 
@@ -169,7 +176,8 @@ for hit in result.hits:
 
 | 语法形态 | 示例 | 语义说明 |
 | :--- | :--- | :--- |
-| **自然语言意图** | `本地搜索引擎架构设计` | 与索引侧同分词器对齐，按 BM25 IDF 软加权组成 OR 召回 |
+| **短关键词** | `error timeout retry` | 保持结构化 AND，优先精确命中 |
+| **自然语言意图** | `本地搜索引擎架构设计` | 自动切换为索引对齐分词 + BM25 IDF 软加权 OR |
 | **精确短语** | `"distributed system"` | 严格词组顺序精确匹配 |
 | **布尔组合** | `error AND (timeout OR retry)` | 括号优先级布尔组合，支持语法自愈 |
 | **后缀过滤** | `ext:md` 或 `ext:py` | 仅检索指定文件类型 |
@@ -201,16 +209,17 @@ lse/
 ├── discovery.py      # 目录递归发现与文本文件识别
 ├── schema.py         # Tantivy 索引 Schema（Zero-Storage + 词级分词注册）
 ├── indexer.py        # 全量/增量/重建索引（单趟流式 IO + BLAKE2b 原子状态）
-├── searcher.py       # 统一检索入口（语法自愈 + 零拷贝磁盘读取 + 宽松降级 + 证据提取）
+├── options.py        # SearchOptions（auto/natural/structured、IDF 权重、字段选择）
+├── searcher.py       # 统一检索入口（自然查询重写 + 语法自愈 + 零拷贝磁盘读取 + 证据提取）
 ├── packer.py         # 🎯 意图到上下文胶囊打包器（AST 闭包 + 1-hop 依赖吸附 + 预算控制 + 剪贴板）
 ├── tokenizer.py      # 代码与 CJK 词级多流分词体系（Jieba 词级切词 + 驼峰解离）
 ├── query_ast.py      # 查询词法分析器与括号平衡自愈编译器
 ├── resonance.py      # 符号与结构感知证据区间求解器
 ├── model.py          # 领域模型 (SearchHit, EvidenceSpan, IndexStatus)
 ├── cli.py            # CLI 命令行入口（index / update / search / pack / status / rebuild / watch）
-├── bench/            # 吞吐基准测试 (bench_engine.py) 与 IR 质量评测 (bench_ir_quality.py)
+├── bench/            # 吞吐 / IR 评测、公开数据集评测 (bench_public.py) 与 query 消融 (bench_ablation.py)
 ├── packaging/        # PyInstaller spec、打包脚本与 CI 发布流程
-└── tests/            # pytest 自动化测试套件 (36 例 100% 通过)
+└── tests/            # pytest 自动化测试套件 (60 例 100% 通过)
 ```
 
 ---
@@ -220,5 +229,5 @@ lse/
 ```bash
 uv run pytest tests/
 ```
-50 例核心单元测试 100% 通过（涵盖分词解离、语法自愈、多层符号感知、静态导入依赖解析、同文件 Intra-file 反查、单趟哈希短路、零存储检索、版本号检索、ContextPacker 依赖解析、Token 预算压包、多语言接口存根化、双向概念投影、Rust/Go 静态导入、相邻跨度融合与剪贴板容错）。
+60 例核心单元测试 100% 通过（涵盖分词解离、语法自愈、多层符号感知、静态导入依赖解析、同文件 Intra-file 反查、单趟哈希短路、零存储检索、版本号检索、ContextPacker 依赖解析、Token 预算压包、多语言接口存根化、双向概念投影、Rust/Go 静态导入、相邻跨度融合与剪贴板容错）。
 
