@@ -575,6 +575,18 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="auto 模式下走结构化 AND 的内容词元上限；0 表示纯词项查询一律走自然 OR（当前默认）",
     )
     lse_group.add_argument("--lse-idf-power", type=float, default=0.25, help="自然查询词项 IDF 权重指数（默认 0.25）")
+    lse_group.add_argument(
+        "--lse-idf-long",
+        type=float,
+        default=None,
+        help="长 query 使用的 IDF 幂次；默认关闭长度分段（实验开关，见 PUBLIC_EVAL §2.5）",
+    )
+    lse_group.add_argument(
+        "--lse-idf-long-chars",
+        type=int,
+        default=160,
+        help="触发 --lse-idf-long 的 query 字符数下限（严格大于）",
+    )
     lse_group.add_argument("--lse-no-idf", action="store_true", help="关闭自然查询中的 IDF 词项加权")
     lse_group.add_argument(
         "--lse-concept-expansion",
@@ -602,6 +614,8 @@ def search_options_from_args(args: argparse.Namespace) -> SearchOptions:
     return SearchOptions(
         query_mode=args.lse_query_mode,
         idf_power=None if args.lse_no_idf else args.lse_idf_power,
+        idf_power_long=args.lse_idf_long,
+        idf_power_long_chars=args.lse_idf_long_chars,
         auto_structured_max_terms=args.lse_auto_max_terms,
         concept_expansion=args.lse_concept_expansion,
         query_fields=fields or DEFAULT_SEARCH_FIELDS,
@@ -742,6 +756,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             "natural_query": lse_options.natural_query,
             "auto_structured_max_terms": lse_options.auto_structured_max_terms,
             "idf_power": lse_options.idf_power,
+            "idf_power_long": lse_options.idf_power_long,
+            "idf_power_long_chars": lse_options.idf_power_long_chars,
             "concept_expansion": lse_options.concept_expansion,
             "query_fields": list(lse_options.query_fields),
             "conjunction_by_default": lse_options.conjunction_by_default,

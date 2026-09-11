@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import json
 import platform
+import random
 import sys
 import tempfile
 import time
@@ -66,13 +67,31 @@ GAP_VARIANTS: dict[str, dict[str, Any]] = {
     "natural_idf100_content": {"idf_power": 1.0, "query_fields": ("content",)},
 }
 
+#: 长度分段 IDF：query 字符数超过阈值时改用候选幂次，阈值以下保持 0.25。
+#: 用于验证 §2.4 诊断出的“长 query 需要更高 IDF 幂次”是否可做成 profile。
+LENGTH_RULE_VARIANTS: dict[str, dict[str, Any]] = {
+    "natural": {},
+    "natural_idf100": {"idf_power": 1.0},
+    "len100_idf050": {"idf_power_long": 0.5, "idf_power_long_chars": 100},
+    "len100_idf100": {"idf_power_long": 1.0, "idf_power_long_chars": 100},
+    "len160_idf050": {"idf_power_long": 0.5, "idf_power_long_chars": 160},
+    "len160_idf100": {"idf_power_long": 1.0, "idf_power_long_chars": 160},
+    "len240_idf050": {"idf_power_long": 0.5, "idf_power_long_chars": 240},
+    "len240_idf100": {"idf_power_long": 1.0, "idf_power_long_chars": 240},
+}
+
 
 def build_policies(suite: str = "auto") -> dict[str, SearchOptions]:
-    """策略集合：``auto`` 为连接语义阈值网格，``gap`` 为残余 gap 诊断变体。"""
+    """策略集合：``auto`` 连接语义网格，``gap`` 打分旋钮，``length`` 长度分段 IDF。"""
     if suite == "gap":
         return {
             name: SearchOptions(query_mode="natural", include_spans=False, **kwargs)
             for name, kwargs in GAP_VARIANTS.items()
+        }
+    if suite == "length":
+        return {
+            name: SearchOptions(query_mode="natural", include_spans=False, **kwargs)
+            for name, kwargs in LENGTH_RULE_VARIANTS.items()
         }
     policies: dict[str, SearchOptions] = {
         "structured_and": SearchOptions(natural_query=False, include_spans=False),
@@ -225,14 +244,29 @@ def default_dev_split(dataset: str) -> str:
     return "train" if dataset in BEIR_DATASETS else "valid"
 
 
+def select_query_subset(query_ids: list[str], subset: str, seed: int = 42) -> list[str]:
+    """按固定种子把 query 固定切成两半（``a`` / ``b``）；``all`` 原样返回。
+
+    A/B 协议：在 A 半上选规则，在从未参与选择的 B 半上报告。切分只依赖
+    query id 排序 + 固定种子，因此可复现且与策略无关。
+    """
+    if subset == "all":
+        return list(query_ids)
+    ordered = sorted(query_ids)
+    random.Random(seed).shuffle(ordered)
+    half = len(ordered) // 2
+    chosen = set(ordered[:half] if subset == "a" else ordered[half:])
+    return [query_id for query_id in query_ids if query_id in chosen]
+
+
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="lse query policy sweep on public dev splits")
     parser.add_argument("--dataset", default="scifact")
     parser.add_argument(
         "--suite",
-        choices=("auto", "gap"),
+        choices=("auto", "gap", "length"),
         default="auto",
-        help="auto: 连接语义阈值网格；gap: 残余负 gap 诊断（IDF / 概念展开 / 查询字段）",
+        help="auto: 连接语义阈值网格；gap: 残余负 gap 诊断；length: 长度分段 IDF 规则",
     )
     parser.add_argument(
         "--jobs",
@@ -244,6 +278,13 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--qrels-split", default="", help="默认 BEIR=train / CoIR=valid")
     parser.add_argument("--top-k", type=int, default=100)
     parser.add_argument("--limit-queries", type=int, default=0)
+    parser.add_argument(
+        "--query-subset",
+        choices=("all", "a", "b"),
+        default="all",
+        help="按 --subset-seed 把 query 固定切成两半，用于 A/B 协议（A 选规则 / B 报告）",
+    )
+    parser.add_argument("--subset-seed", type=int, default=42)
     parser.add_argument("--policies", default="", help="逗号分隔策略名，默认全部")
     parser.add_argument("--include-tantivy", action="store_true", help="同时运行原生 BM25 参考线")
     parser.add_argument(
@@ -289,6 +330,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     query_ids = [query_id for query_id in queries if qrels.get(query_id)]
     if args.limit_queries > 0:
         query_ids = query_ids[: args.limit_queries]
+    query_ids = select_query_subset(query_ids, args.query_subset, args.subset_seed)
     selected_queries = {query_id: queries[query_id] for query_id in query_ids}
 
     policies = build_policies(args.suite)
@@ -299,7 +341,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 2
 
     print(
-        f"dataset={args.dataset} split={split} docs={len(docs)} queries={len(selected_queries)} "
+        f"dataset={args.dataset} split={split} subset={args.query_subset} docs={len(docs)} "
+        f"queries={len(selected_queries)} "
         f"qrels_queries={len(qrels)} top_k={args.top_k} policies={len(names)}"
     )
 
@@ -412,6 +455,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         "dataset": args.dataset,
         "qrels_split": split,
         "suite": args.suite,
+        "query_subset": args.query_subset,
+        "subset_seed": args.subset_seed,
         "docs": len(docs),
         "queries": len(selected_queries),
         "top_k": args.top_k,
@@ -424,6 +469,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "natural_query": options.natural_query,
                 "auto_structured_max_terms": options.auto_structured_max_terms,
                 "idf_power": options.idf_power,
+                "idf_power_long": options.idf_power_long,
+                "idf_power_long_chars": options.idf_power_long_chars,
                 "concept_expansion": options.concept_expansion,
                 "conjunction_by_default": options.conjunction_by_default,
                 "rank_only": not options.include_spans,

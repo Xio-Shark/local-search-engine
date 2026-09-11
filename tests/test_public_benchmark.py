@@ -160,6 +160,26 @@ def test_bucket_analysis_by_query_length() -> None:
     assert all(row["key"] == "chars" for row in rows)
 
 
+def test_length_suite_and_query_subset() -> None:
+    from bench.bench_query_policy import build_policies, select_query_subset
+
+    policies = build_policies("length")
+    assert policies["natural"].idf_power_long is None
+    assert policies["len160_idf100"].idf_power == 0.25
+    assert policies["len160_idf100"].idf_power_long == 1.0
+    assert policies["len160_idf100"].idf_power_long_chars == 160
+    assert all(options.query_mode == "natural" for options in policies.values())
+
+    query_ids = [f"q{index:03d}" for index in range(10)]
+    half_a = select_query_subset(query_ids, "a", seed=42)
+    half_b = select_query_subset(query_ids, "b", seed=42)
+    assert len(half_a) == len(half_b) == 5
+    assert not set(half_a) & set(half_b)
+    assert sorted(half_a + half_b) == sorted(query_ids)
+    assert select_query_subset(query_ids, "a", seed=42) == half_a
+    assert select_query_subset(query_ids, "all") == query_ids
+
+
 class _FakeBatch:
     def __init__(self, rows):
         self._rows = rows
