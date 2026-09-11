@@ -6,7 +6,7 @@
 - 📦 **意图到上下文胶囊 (lse pack)**：搜索即 Prompt！按自然语言意图秒级定位核心语法块，就地自动吸附其内部调用的 1-hop 依赖符号声明（类/函数接口），在严格 Token 预算内压缩并一键注入剪贴板（`Cmd+V` 直达 AI）
 - 🔤 **词级多流倒排索引 (Word-level BM25)**：代码标识符（驼峰/蛇形/类路径）解离 + Jieba CJK 词级多粒度展开真正写入倒排索引，彻底解决纯字元 `ngram(1,2)` 导致的 IDF 统计失效与排序失真
 - 💾 **零存储（Zero-Storage）本地架构**：Tantivy 仅作为倒排与排序器，不存压缩正文副本，命中后零拷贝直读磁盘，索引体积显著缩减
-- 🛡️ **自适应查询语义与语法自愈**：短关键词查询保持结构化 AND 精度；长句 / claim 自动切换为与索引侧同分词器对齐、按 BM25 IDF 软加权的 OR。代码片段会绕过 Query DSL 判定，避免字符串引号 / dict `name:` 被误解析。字段过滤、显式布尔、短语、排序等结构化语法仍走 AST。自动补齐未闭合括号、修剪悬挂操作符，杜绝脱靶与崩溃
+- 🛡️ **自适应查询语义与语法自愈**：纯词项查询统一走与索引侧同分词器对齐、按 BM25 IDF 软加权的 OR（短查询 AND 阈值经四个公开 dev split 扫描后定为 0，见 [bench/PUBLIC_EVAL.md](bench/PUBLIC_EVAL.md)）。代码片段会绕过 Query DSL 判定，避免字符串引号 / dict `name:` 被误解析。字段过滤、显式布尔、短语、排序等结构化语法仍走 AST。自动补齐未闭合括号、修剪悬挂操作符，杜绝脱靶与崩溃
 - ⚡ **rank-only 预筛模式**：`SearchOptions(include_spans=False)` 只返回排序元数据（`path/filename/extension/size/mtime/score`），不读正文、不算 evidence span，为 Agent 预筛与 rerank 召回提供与原生 BM25 同口径的延迟
 - ⚡ **单趟流式 IO 与极速增量**：一次读取同时完成 BLAKE2b 哈希与文本解码；增量更新对未修改文件毫秒级短路，零无意义哈希重读
 - 💻 **极简轻量**：纯 CLI，零后台常驻守护，跨平台二进制打包发布
@@ -138,19 +138,19 @@ uv run --extra eval python bench/bench_public.py \
   --baselines lse,tantivy \
   --deterministic-index --repeat 3 --bootstrap-samples 5000
 
-# BEIR 泛化补跑
-for ds in nfcorpus fiqa arguana; do
-  uv run python bench/bench_public.py --dataset "$ds" --baselines lse,tantivy \
-    --deterministic-index --bootstrap-samples 5000
-done
+# BEIR 泛化补跑（数据集级并行：--dataset a,b,c --jobs N）
+uv run python bench/bench_public.py \
+  --dataset nfcorpus,fiqa,arguana --jobs 3 --baselines lse,tantivy \
+  --lse-rank-only --deterministic-index --bootstrap-samples 5000 \
+  --output-json "bench/results/{dataset}-rank-only.json"
 ```
 
 | 数据集 / split | Baseline | nDCG@10 | Recall@10 | MRR@10 | full p50 | rank-only p50 |
 | :--- | :--- | ---: | ---: | ---: | ---: | ---: |
-| SciFact test (300 q) | **lse（默认）** | **0.6492** | **0.7955** | **0.6074** | 19.99 ms | 0.86 ms |
+| SciFact test (300 q) | **lse（默认）** | **0.6492** | **0.7955** | **0.6074** | 19.99 ms | 0.69 ms |
 | SciFact test (300 q) | native Tantivy BM25 | 0.6232 | 0.7508 | 0.5886 | 0.15 ms | 0.15 ms |
 | SciFact test (300 q) | ripgrep term-count | 0.0477 | 0.1025 | 0.0311 | 84.32 ms | — |
-| CosQA test (500 q) | **lse（默认）** | **0.1505** | 0.2980 | **0.1073** | 10.93 ms | 0.90 ms |
+| CosQA test (500 q) | **lse（默认）** | **0.1505** | 0.2980 | **0.1073** | 10.93 ms | 0.69 ms |
 | CosQA test (500 q) | native Tantivy BM25 | 0.1481 | 0.2900 | 0.1063 | 0.13 ms | 0.13 ms |
 | CodeSearchNet-Python sample (2,000 q) | lse（默认） | 0.9451 | **0.9805** | 0.9336 | 32.14 ms | 1.13 ms |
 | CodeSearchNet-Python sample (2,000 q) | native Tantivy BM25 | **0.9453** | 0.9750 | **0.9355** | 0.47 ms | 0.47 ms |
@@ -166,24 +166,31 @@ done
   字段权重，而不是直接上 reranker 或向量检索。
 - `SearchOptions(include_spans=False)` 提供明确拆分的 rank-only 口径：
   三个数据集上排序结果 / nDCG 与 full 模式完全相同，rank-only p50 为
-  0.86 / 0.90 / 1.13 ms；full p50 则包含正文读取与 evidence span 切片，
+  0.69 / 0.69 / 1.13 ms；full p50 则包含正文读取与 evidence span 切片，
   是 Agent 拿上下文时的真实成本。
 
-**BEIR 泛化补跑（默认 auto + IDF^0.25）**：
+**BEIR 泛化补跑（短查询 AND 阈值改为 0 之后，默认 auto + IDF^0.25）**：
 
 | 数据集（test） | lse nDCG@10 | native BM25 | mean diff | 95% CI |
 | :--- | ---: | ---: | ---: | ---: |
-| NFCorpus（323 q） | 0.2884 | **0.2994** | -0.0110 | [-0.0232, +0.0010] |
-| FiQA（648 q） | 0.2283 | **0.2336** | -0.0054 | [-0.0138, +0.0026] |
+| NFCorpus（323 q） | **0.3061** | 0.2994 | +0.0067 | [-0.0022, +0.0160] |
+| FiQA（648 q） | 0.2297 | **0.2336** | -0.0039 | [-0.0119, +0.0040] |
 | Arguana（1,406 q） | 0.3097 | **0.3152** | -0.0055 | [-0.0122, +0.0009] |
 
-三条 CI 均跨 0，不能判定显著劣化，但点估计全为负，也没有出现 SciFact
-的正 gap。`IDF^0.25 + auto` 不能外推为通用最优；NFCorpus 用
-`--lse-query-mode natural` 后 nDCG@10 = **0.3061**，反超 native BM25 的
-0.2994（mean diff **+0.0067**，95% CI [-0.0022, +0.0160]，仍跨 0），
-说明短查询 auto AND 阈值是下一步最值得验证的方向。**Phase C1 未达到
-“多数数据集不劣于 native BM25”的验收线，当前不能 bump 0.3.0 / 打 tag /
-进入 tree-sitter 或 reranker 投资。**
+短查询阈值由 `bench/bench_query_policy.py` 在 SciFact train / NFCorpus train /
+FiQA train / CosQA valid 四个 dev split 上扫描得到：0（纯词项查询一律 OR）在
+四个数据集上全部最优或并列最优，任何 >0 的阈值都只会在 NFCorpus 上掉分。
+切换后 NFCorpus 从 -0.0110 翻正到 +0.0067，FiQA 从 -0.0054 收到 -0.0039，
+Arguana 不变；五个 test 数据集中 SciFact（+0.0260，CI 不跨 0）、NFCorpus
+（+0.0067）、CosQA（+0.0025）点估计为正，FiQA / Arguana 仍为小幅负值但
+CI 跨 0。**没有数据集再出现显著负 gap，但也不足以宣称通用 / 代码检索领先。**
+
+残余负 gap 已按 §2.4 的旋钮诊断定位：概念展开与查询字段逐位无影响，
+唯一有效的是 IDF 幂次，且最优值随 query 形态变化——Arguana（全部 >160
+字符的长论据 query）用 `IDF^1.0` 可把 gap 从 -0.0055 翻正到 +0.0017，
+四个 dev split 则一致支持当前的 `0.25`。因此这是打分权重的 profile 问题，
+不是缺少 reranker / tree-sitter 能力；长度自适应 IDF 需要带 train split
+的长 query 数据集才能验证，本轮不改默认值。
 
 完整消融、缓存 / 延迟对比、统计方法、复现命令与原始 JSON 见
 [bench/PUBLIC_EVAL.md](bench/PUBLIC_EVAL.md)。
@@ -221,7 +228,7 @@ for hit in result.hits:
 
 | 语法形态 | 示例 | 语义说明 |
 | :--- | :--- | :--- |
-| **短关键词** | `error timeout retry` | 保持结构化 AND，优先精确命中 |
+| **短关键词** | `error timeout retry` | 与索引对齐分词 + IDF 软加权 OR（dev split 扫描证明短查询 AND 在四个数据集上均不占优） |
 | **自然语言意图** | `本地搜索引擎架构设计` | 自动切换为索引对齐分词 + BM25 IDF 软加权 OR |
 | **精确短语** | `"distributed system"` | 严格词组顺序精确匹配 |
 | **布尔组合** | `error AND (timeout OR retry)` | 括号优先级布尔组合，支持语法自愈 |

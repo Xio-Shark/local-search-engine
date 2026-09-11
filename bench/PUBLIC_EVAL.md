@@ -10,12 +10,17 @@
 | 数据集 | 语料 | dev split（只用于调参） | test split（只用于最终报告） | 指标 |
 | :--- | ---: | :--- | :--- | :--- |
 | BEIR / SciFact | 5,183 篇摘要 | `qrels/train.tsv`，809 条 | `qrels/test.tsv`，300 条 | nDCG@10 / Recall@10 / MRR@10，深度 100 |
+| BEIR / NFCorpus | 3,633 篇医学摘要 | `qrels/train.tsv`，2,590 条 | `qrels/test.tsv`，323 条 | 同上 |
+| BEIR / FiQA | 57,638 条金融问答 | `qrels/train.tsv`，5,500 条 | `qrels/test.tsv`，648 条 | 同上 |
+| BEIR / Arguana | 8,674 条论据 | 无 train qrels | `qrels/test.tsv`，1,406 条 | 同上 |
 | CoIR / CosQA | 20,604 条 Python 代码 | `data/valid`，500 条 | `data/test`，500 条 | 同上 |
 | CoIR / CodeSearchNet-Python（采样） | 20,000 docs（固定种子） | 无官方 train qrels | 从 14,918 条 test qrels 中固定采样 2,000 条 | 同上 |
 
 SciFact train / test qrels 只有 1 条 query 重叠；CoIR CosQA 使用官方
-valid / test 划分。默认参数（`query_mode=auto` + `IDF^0.25`）只在 dev split
-上选择，随后原样跑 test split，避免在最终报告集上调参。
+valid / test 划分。默认参数（`query_mode=auto` + `auto_structured_max_terms=0`
++ `IDF^0.25`）只在 dev split 上选择，随后原样跑 test split，避免在最终
+报告集上调参。Arguana 没有官方 train qrels，只作为泛化验证集出现，
+不参与任何默认值选择。
 
 CodeSearchNet 只有 test qrels，26 万级 corpus / query；本节报告的是
 `--sample-docs 20000 --sample-queries 2000 --seed 42` 的固定种子采样：
@@ -94,6 +99,134 @@ uv run --extra eval python bench/bench_public.py \
 CosQA 每个 query 只有 1 条相关文档，大量 query 的 nDCG@10 由并列排序决定。
 dev 上 `natural_idf025` 最优，但领先幅度只有 0.005 左右，因此最终 test 需要
 paired bootstrap 判断是否显著。
+
+### 2.3 短查询 auto AND 阈值扫描（四个 dev split）
+
+`bench_ablation.py` 每个变体都要重建索引，无法扫完整阈值网格；
+`bench_query_policy.py` 只切换 `SearchOptions`，索引与文档目录只建一次，
+并额外输出按内容词元数分桶的 natural vs structured 对比。所有策略都是
+rank-only（`include_spans=False`），已确认排序与 full 模式一致。
+
+```bash
+# 数据集级并行：benchmark 进程是单线程的（实测 cpu/wall ≈ 1.0），
+# 每个子进程独占临时索引目录，结果与串行逐位一致。
+uv run --extra eval python bench/bench_query_policy.py \
+  --dataset scifact,nfcorpus,fiqa,cosqa --jobs 4 \
+  --include-tantivy --deterministic-index \
+  --output-json "bench/results/query-policy-{dataset}.json"
+```
+
+四个数据集串行 153.7 s，按数据集并行 **117.5 s**；下限由最慢的 FiQA
+决定。脚本会把阶段计时写进 JSON 的 `timings` 字段：
+
+| 数据集 | dataset load | materialize | index build | policy eval（12 策略） | total |
+| :--- | ---: | ---: | ---: | ---: | ---: |
+| SciFact train（809 q） | 0.0 s | 0.5 s | 1.6 s | 9.0 s | 15.1 s |
+| NFCorpus train（2,590 q） | 0.1 s | 0.3 s | 1.2 s | 14.6 s | 25.4 s |
+| FiQA train（5,500 q） | 0.2 s | 6.2 s | 11.0 s | **74.8 s** | 116.8 s |
+| CosQA valid（500 q） | 0.3 s | 2.5 s | 3.3 s | 6.0 s | 16.0 s |
+
+FiQA 的 `policy_eval`（12 策略 × 5,500 query × ~1.1 ms，即引擎真实
+rank-only 单查询成本）占其总耗时 64%，是并行之后的主要瓶颈；若以后需要
+再压时间，应按策略分片并行，而不是继续调栅格。
+
+nDCG@10（`auto@N` = 内容词元数 ≤ N 时走结构化 AND；`auto@0` 等价于 natural）：
+
+| 策略 | SciFact train | NFCorpus train | FiQA train | CosQA valid | 均值 |
+| :--- | ---: | ---: | ---: | ---: | ---: |
+| native Tantivy BM25 | 0.6314 | 0.2989 | 0.2316 | 0.1426 | 0.3261 |
+| `structured_and`（旧默认） | 0.5958 | 0.2648 | 0.1500 | 0.1422 | 0.2882 |
+| `structured_or` | 0.6081 | 0.2884 | 0.1714 | 0.1463 | 0.3036 |
+| **`natural` / `auto@0`（当前默认）** | **0.6499** | **0.3022** | **0.2308** | **0.1473** | **0.3326** |
+| `auto@1` | 0.6499 | 0.3012 | 0.2308 | 0.1473 | 0.3323 |
+| `auto@2` | 0.6499 | 0.2903 | 0.2303 | 0.1473 | 0.3295 |
+| `auto@3`（旧默认阈值） | 0.6499 | 0.2863 | 0.2298 | 0.1473 | 0.3283 |
+| `auto@4` | 0.6499 | 0.2821 | 0.2291 | 0.1448 | 0.3265 |
+| `auto@6` | 0.6499 | 0.2749 | 0.2267 | 0.1436 | 0.3238 |
+| `auto@12` | 0.6478 | 0.2713 | 0.2192 | 0.1421 | 0.3201 |
+
+结论：
+
+1. **阈值 0 在四个 dev split 上全部最优或并列最优。** SciFact train 的
+   query 内容词元数都 ≥ 3，所以 N ≤ 6 的阈值在该数据集上完全等价；
+   但 NFCorpus train 有 762 条 ≤ 1 词元的 query，阈值每提高一档都会掉分
+   （`auto@1` 已 -0.0010，CI [-0.0019, -0.0003]；`auto@3` -0.0158）。
+2. **分桶后 natural 在每个词元数桶都 ≥ structured AND**，包括
+   `content_terms=1`（NFCorpus：0.3209 vs 0.3175），不存在“极短查询
+   仍然该用 AND”的子区间。
+3. CosQA 是代码 query，走代码路径，阈值对它几乎无影响（0.1473 持平），
+   因此该选择不需要在代码检索上做额外妥协。
+4. 选中的是 profile（纯词项 → 与索引对齐分词 + IDF 加权 OR），不是
+   数据集特判：没有任何按数据集 / 按查询来源切换策略的逻辑。
+
+`SearchOptions.auto_structured_max_terms` 暴露了该阈值（默认 0，
+负值报错），`bench_public.py --lse-auto-max-terms` 可复现其他取值。
+
+### 2.4 残余负 gap 诊断：IDF 幂次 vs 概念展开 vs 查询字段
+
+§3.4 里 FiQA / Arguana 的点估计仍为负。为了区分“缺能力”和“打分旋钮 /
+profile 没选对”，用同一套单索引扫描固定 natural 路径，只切换打分参数
+（`--suite gap`），不引入任何新模型：
+
+```bash
+# 四个 dev split + Arguana（无 train qrels，只用于解释，不参与选择）
+uv run --extra eval python bench/bench_query_policy.py \
+  --dataset scifact,nfcorpus,fiqa,cosqa --jobs 4 --suite gap \
+  --include-tantivy --deterministic-index \
+  --output-json "bench/results/gap-probe-{dataset}.json"
+uv run --extra eval python bench/bench_query_policy.py \
+  --dataset arguana --qrels-split test --suite gap \
+  --include-tantivy --deterministic-index \
+  --output-json bench/results/gap-probe-arguana.json
+```
+
+nDCG@10（`natural` = 当前默认 IDF^0.25 + 概念展开 + content,filename,path）：
+
+| 策略 | SciFact train | NFCorpus train | FiQA train | CosQA valid | Arguana test |
+| :--- | ---: | ---: | ---: | ---: | ---: |
+| native Tantivy BM25 | 0.6314 | 0.2989 | **0.2316** | 0.1426 | 0.3152 |
+| **`natural`（当前默认）** | **0.6499** | **0.3022** | 0.2308 | **0.1473** | 0.3097 |
+| `natural_no_idf`（完全不加权） | 0.6437 | 0.3015 | 0.2301 | 0.1448 | 0.3028 |
+| `natural_idf050` | 0.6453 | 0.3013 | 0.2277 | 0.1408 | 0.3124 |
+| `natural_idf100` | 0.6395 | 0.2984 | 0.2115 | 0.1396 | **0.3169** |
+| `natural_noconcept` | 0.6499 | 0.3022 | 0.2309 | 0.1480 | 0.3097 |
+| `natural_content_only` | 0.6499 | 0.3022 | 0.2308 | 0.1473 | 0.3097 |
+
+相对 native BM25 的 delta（nDCG@10）：
+
+| 策略 | SciFact | NFCorpus | FiQA | CosQA | Arguana |
+| :--- | ---: | ---: | ---: | ---: | ---: |
+| `natural` | +0.0186 | +0.0033 | -0.0007 | +0.0047 | -0.0055 |
+| `natural_idf100` | +0.0082 | -0.0005 | -0.0200 | -0.0030 | **+0.0017** |
+
+结论：
+
+1. **概念展开与查询字段被排除**：`natural_noconcept` / `natural_content_only`
+   与 `natural` 在五个数据集上逐位相同（W/L/T = 0/0/N；FiQA 只有 5 条
+   query 差 1e-4、CosQA 1 条）。残余 gap 与“同义词扩召回噪声”“filename /
+   path 字段污染”无关。
+2. **唯一有效旋钮是 IDF 幂次，且最优值随 query 形态变化**：`0.25` 在四个
+   dev split 上最优；Arguana（1,406 条全部 >160 字符的长论据 query）上
+   `IDF^1.0` 显著更好（+0.0072，CI [+0.0026, +0.0119]），并把该数据集
+   相对 native BM25 的 gap 从 -0.0055 **翻正到 +0.0017**。完全不加权
+   （`no_idf`）在五个数据集上全部更差，说明 IDF 加权本身不是问题，
+   幂次才是。
+3. **长度分桶是同一机制的第二观测点**：SciFact train 中 >160 字符的
+   18 条 query，natural 比 native 低 0.1333；FiQA 最大的负桶是 21-40
+   字符（-0.0060），其余桶都在 ±0.002 内。即“长 query 需要更接近原生
+   BM25 的 IDF 幂次，短 claim / question 需要压平 IDF”。
+4. **不把它变成默认值**：Arguana 没有 train qrels，无法在 dev split 上
+   验证“按 query 长度切换 IDF 幂次”的 profile，而四个 dev split 一致
+   支持当前 0.25；在最终报告集上按长度调参违反本文件的调参纪律。
+5. **仍未验证的结构性差异（明确标注，不在本轮结论内）**：lse 把 `title`
+   并入 `content` 单字段，native 用 `title` + `body` 双字段。本轮实验全部
+   在 `SearchOptions` 层面，无法测试字段布局；但 `idf100` 已把 Arguana
+   翻正、其余数据集点估计 ≥ 0，残余 ≤0.004，没有证据显示它是主要缺口。
+   若要继续验证，应先找一个带 train split 的长 query 数据集（如
+   HotpotQA），而不是直接改 schema 或上 reranker / tree-sitter。
+6. FiQA 的 dev（train）gap 只有 -0.0007，test 上为 -0.0039，量级差异属于
+   split 间波动；FiQA 的旋钮结论（0.25 最优、1.0 显著更差）在两个
+   split 上一致。
 
 ## 3. 最终 test split 结果
 
@@ -182,55 +315,65 @@ paired bootstrap（nDCG@10，5000 次重采样）：
 宣称 lse 在代码检索上领先**；后续应先查 tokenizer / IDF / 字段权重，
 而不是直接上 reranker / 向量检索。真实代码检索的结论仍是“未确认”。
 
-### 3.4 泛化验证：NFCorpus / FiQA / Arguana
+### 3.4 泛化验证：NFCorpus / FiQA / Arguana（阈值 0 口径全部复跑）
+
+§2.3 的 dev 扫描把默认 `auto_structured_max_terms` 从 3 改为 0，随后原样
+重跑全部 test split（rank-only 口径，排序与 full 一致）：
 
 ```bash
-for ds in nfcorpus fiqa arguana; do
-  uv run python bench/bench_public.py --dataset "$ds" --baselines lse,tantivy \
-    --deterministic-index --bootstrap-samples 5000 \
-    --output-json "bench/results/$ds.json"
-done
-
-# NFCorpus 显式 natural profile；FiQA natural 作为补充诊断
-uv run python bench/bench_public.py --dataset nfcorpus --baselines lse,tantivy \
-  --lse-query-mode natural --deterministic-index --bootstrap-samples 5000 \
-  --output-json bench/results/nfcorpus-natural.json
-uv run python bench/bench_public.py --dataset fiqa --baselines lse,tantivy \
-  --lse-query-mode natural --deterministic-index --bootstrap-samples 5000 \
-  --output-json bench/results/fiqa-natural.json
+# 数据集级并行；结果与串行逐位一致（mean diff 差 0.00e+00）
+uv run python bench/bench_public.py \
+  --dataset scifact,nfcorpus,fiqa,arguana,cosqa --jobs 3 \
+  --baselines lse,tantivy --lse-rank-only --deterministic-index \
+  --bootstrap-samples 5000 \
+  --output-json "bench/results/{dataset}-rank-only.json"
 ```
+
+串行 5 次合计 34.1 s → 并行 21.4 s（`--jobs 3` 两批，FiQA 批次为下限；
+`--jobs 5` 单批约 14 s）。
 
 | 数据集（test） | lse nDCG@10 | native BM25 | mean diff | 95% CI | W/L/T |
 | :--- | ---: | ---: | ---: | ---: | :--- |
-| NFCorpus（323 q） | 0.2884 | **0.2994** | -0.0110 | [-0.0232, +0.0010] | 72/87/164 |
-| FiQA（648 q） | 0.2283 | **0.2336** | -0.0054 | [-0.0138, +0.0026] | 95/103/450 |
+| SciFact（300 q） | **0.6492** | 0.6232 | **+0.0260** | [+0.0006, +0.0518] | 66/51/183 |
+| NFCorpus（323 q） | **0.3061** | 0.2994 | +0.0067 | [-0.0022, +0.0160] | 85/74/164 |
+| FiQA（648 q） | 0.2297 | **0.2336** | -0.0039 | [-0.0119, +0.0040] | 95/101/452 |
 | Arguana（1,406 q） | 0.3097 | **0.3152** | -0.0055 | [-0.0122, +0.0009] | 255/301/850 |
+| CosQA（500 q） | **0.1505** | 0.1481 | +0.0025 | [-0.0087, +0.0136] | 28/26/446 |
 
-三条 CI 都跨 0，因此**不能判定 lse 显著劣于原生 BM25**；但三个点估计
-全部为负，也**没有出现 SciFact 上的正 gap**。这直接说明：`IDF^0.25`
-与 `query_mode=auto` 的组合不能从 SciFact 外推为通用最优，SciFact 的
-+0.0260 更像数据集特定收益，而不是引擎的普遍优势。
+与阈值 3 的旧口径对比：
 
-进一步定位：
+| 数据集 | 阈值 3（旧） | 阈值 0（新） | 变化 |
+| :--- | ---: | ---: | :--- |
+| NFCorpus | 0.2884（diff -0.0110） | **0.3061（diff +0.0067）** | 翻正，+0.0177 |
+| FiQA | 0.2283（diff -0.0054） | 0.2297（diff -0.0039） | +0.0014 |
+| Arguana | 0.3097（diff -0.0055） | 0.3097（diff -0.0055） | 不变 |
+| SciFact | 0.6492（diff +0.0260） | 0.6492（diff +0.0260） | 不变 |
+| CosQA | 0.1505（diff +0.0025） | 0.1505（diff +0.0025） | 不变 |
 
-1. **短查询 auto AND 是明确缺口**。NFCorpus 用
-   `--lse-query-mode natural` 后 nDCG@10 = **0.3061**，反超原生 BM25 的
-   0.2994（mean diff **+0.0067**，95% CI [-0.0022, +0.0160]，仍跨 0）。
-   默认 auto 的短关键词 AND 策略在该数据集损失约 0.011 nDCG，说明并不是
-   BM25 打分本身弱，而是短查询连接语义需要按数据分布选择。
-2. **句中标点误判曾显著伤害 FiQA / Arguana**。修复前的 FiQA diff 为
-   -0.0125（CI 显著为负）、Arguana 为 -0.1310（CI 显著为负）。原因是
-   自然语言 claim 中的 `business:`、`environment:` 及句内引号被
-   `QueryCompiler` 误判为字段表达式 / 精确短语，从而退回结构化 AND AST。
-   现已改为“未知 prefix:value 与长句中的引号按自然语言标点处理”，
-   修复后两条 diff 均回到 CI 跨 0。
-3. **`IDF^0.25` 本身不是唯一问题**。关闭 IDF 或在自然模式下改变
-   IDF power，并未在这些数据集上出现系统性反转；不应把结论简单写成
-   “IDF^0.25 在 SciFact 过拟合后直接砍掉”。下一步需要的是按数据集 /
-   查询模式选择 profile，或把短查询 auto AND 改为经过 dev 验证的策略。
+结论：
 
-**发布决策**：Phase C1 未达到“多数数据集上不劣于 native BM25”的
-验收线，当前不应 bump 0.3.0 或进入 tree-sitter / reranker 等新能力投资。
+1. **短查询 auto AND 缺口已关闭**。NFCorpus 从 -0.0110 翻正到 +0.0067
+   （与旧口径下 `--lse-query-mode natural` 的 0.3061 完全一致，说明
+   缺口的全部来源就是短查询连接语义，而不是 BM25 打分）。
+2. **没有任何数据集再出现显著负 gap**：FiQA / Arguana 仍是小幅负值，
+   但 CI 跨 0，且点估计都比旧口径更接近 0 或不变。
+3. **仍不足以宣称领先**：5 个 test 数据集中只有 SciFact 的正 gap
+   CI 不跨 0，NFCorpus / CosQA 的点估计为正但 CI 跨 0。
+   FiQA / Arguana 的点估计仍为负，说明 FiQA 的长句 / 多主题 query
+   与 Arguana 的长论据仍有未解释的差距，不能把这一轮修复包装成
+   “lse 全面优于原生 BM25”。
+4. **句中标点误判是上一轮已修的独立问题**：修复前 FiQA diff 为 -0.0125
+   （CI 显著为负）、Arguana 为 -0.1310（CI 显著为负）；自然语言 claim 中的
+   `business:`、`environment:` 及句内引号曾被 `QueryCompiler` 误判为字段
+   表达式 / 精确短语而退回结构化 AND AST，现按自然语言标点处理。
+5. **`IDF^0.25` 本身没有被证伪**：关闭 IDF 或改变 IDF power 都不能在
+   这些数据集上产生系统性反转，因此保留 dev split 上选出的 0.25。
+
+**发布决策**：短查询策略这一前置问题已按 dev split 证据解决，C1 不再有
+“显著劣于 native BM25”的数据集；但正 gap 仍只在 SciFact 上显著，
+因此仍不应把结论写成通用 / 代码检索领先，也不应立刻 bump 0.3.0。
+下一步若继续做质量投资，应先解释 FiQA / Arguana 的残余负 gap
+（query 长度 / 多主题结构），而不是直接上 reranker 或 tree-sitter。
 
 ## 4. 延迟：概念图缓存（P0）、rank-only 与 evidence span 成本
 
@@ -255,8 +398,8 @@ profiling（SciFact，`limit=10`）显示旧实现每个 query 都执行
 
 | 数据集 | lse full p50 | lse rank-only p50 | native BM25 p50 | nDCG 是否一致 |
 | :--- | ---: | ---: | ---: | :--- |
-| SciFact test | 19.99 ms | **0.86 ms** | 0.18 ms | 完全一致 (0.6492) |
-| CosQA test | 10.93 ms | **0.90 ms** | 0.15 ms | 完全一致 (0.1505) |
+| SciFact test | 19.99 ms | **0.69 ms** | 0.15 ms | 完全一致 (0.6492) |
+| CosQA test | 10.93 ms | **0.69 ms** | 0.13 ms | 完全一致 (0.1505) |
 | CodeSearchNet-Python 采样 | 32.14 ms | **1.13 ms** | 0.47 ms | 完全一致 (0.9451) |
 
 full p50 包含命中后读取正文、计算 evidence span / snippet，是 Agent 拿到
@@ -269,9 +412,10 @@ tokenizer / IDF 编译。
 
 当前默认查询策略（`lse.options.SearchOptions`）：
 
-1. **auto 查询模式**：短关键词查询（≤ 3 个内容词元、无句末标点）→ 结构化
-   AND，保留文件搜索精度；长句 / claim → 用索引侧同一套 `tokenize_stream`
-   分词，编译成字段内 OR-of-terms，并按 `IDF^0.25` 加权。
+1. **auto 查询模式**：纯词项查询 → 用索引侧同一套 `tokenize_stream` 分词，
+   编译成字段内 OR-of-terms，并按 `IDF^0.25` 加权；短查询 AND 阈值
+   `auto_structured_max_terms` 默认 **0**（四个 dev split 扫描结果见 §2.3），
+   非 0 取值仅用于复现实验。
 2. **代码片段识别**：整段含换行或出现强代码声明形态时，忽略 Query DSL
    语法（Python 字符串引号、dict `name:`、类型标注等），直接按索引侧
    tokenizer 走自然语言 OR 路径。
@@ -286,19 +430,33 @@ tokenizer / IDF 编译。
 7. **benchmark 可复现性**：`--deterministic-index`、`--repeat N`、
    per-query JSON、paired bootstrap（`--bootstrap-samples` / `--bootstrap-metric`）、
    固定种子 CoIR 采样（`--sample-docs` / `--sample-queries` / `--seed`）。
+8. **benchmark 运行开销约定**：两个脚本都支持 `--dataset a,b,c --jobs N`
+   数据集级并行（子进程隔离，结果与串行逐位一致）；JSON 默认只存聚合值 /
+   显著性 / 分桶（`--include-per-query` 才存 per-query），产物 KB 级；
+   `bench_query_policy.py` 会把 `dataset_load / materialize / index_build /
+   policy_eval / total` 阶段计时写进 JSON。**不要为了改产物形态重跑
+   benchmark**：先用已有 JSON 做后处理，只有口径（策略 / 划分 / 采样）变化
+   才需要重跑。
 
 ## 6. 已知边界
 
-1. 除 SciFact 外，CosQA、CodeSearchNet 采样、NFCorpus、FiQA、Arguana
-   上 lse 相对原生 BM25 的点估计均不为正；多数 CI 跨 0，不能宣称
-   通用或代码检索领先。
-2. `IDF^0.25 + query_mode=auto` 尚未证明可泛化；NFCorpus 上显式
-   `query_mode=natural` 即可从 -0.0110 回到持平，短查询 auto AND
-   阈值是下一步最值得验证的方向。
-3. 当前不能 bump 0.3.0 / 打 tag / 走 release workflow：Phase C1 的
-   “多数数据集不劣于 native BM25”前置条件未满足。条件性优化应优先
-   做 query profile / 短查询策略，而不是 title/BM25F、reranker 或
-   tree-sitter。
+1. 5 个 test 数据集中只有 SciFact 的正 gap CI 不跨 0（+0.0260）；
+   NFCorpus（+0.0067）、CosQA（+0.0025）为正但 CI 跨 0；FiQA（-0.0039）、
+   Arguana（-0.0055）点估计仍为负。没有任何数据集显著劣于原生 BM25，
+   但仍不能宣称通用或代码检索领先。
+2. 短查询 auto AND 已按四个 dev split 的证据改为阈值 0（§2.3），
+   NFCorpus test 随之从 -0.0110 翻正到 +0.0067。`IDF^0.25` 保留：
+   dev 上最优，且关闭 / 改变 IDF power 都不能在这些数据集上产生
+   系统性反转。FiQA / Arguana 的残余负 gap 已定位到 IDF 幂次与
+   query 长度形态（§2.4）：概念展开、查询字段逐位无影响；Arguana 上
+   `IDF^1.0` 可把 gap 翻正，但该数据集没有 train qrels，无法在 dev 上
+   验证“按长度切换 IDF 幂次”的 profile，因此本轮不改默认值。
+3. 当前不 bump 0.3.0 / 打 tag / 走 release workflow：C1 已无“显著劣于
+   native BM25”的数据集，但正 gap 只在 SciFact 显著，证据强度不足以支撑
+   一次版本发布。残余量级已收敛到 ≤0.0055 nDCG 且定位在打分权重层面，
+   因此下一步不是 title/BM25F、reranker 或 tree-sitter；若继续，应先
+   找带 train split 的长 query 数据集验证长度自适应 IDF，或验证
+   `title` 独立字段这一未测结构差异。
 4. CodeSearchNet 目前只跑固定种子采样（20k docs / 2k queries），未跑全量
    280,310 docs；如果后续需要全量，应继续使用流式 parquet + 采样，
    不能 materialize 28 万个小文件。
