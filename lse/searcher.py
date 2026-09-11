@@ -69,7 +69,9 @@ class SearchEngine:
         compiler = QueryCompiler(
             query, concept_map=concept_map, expand_concepts=opts.concept_expansion
         )
-        plain_terms = compiler.plain_terms() if opts.natural_query else None
+        all_plain_terms = compiler.plain_terms()
+        use_natural = _should_use_natural_query(all_plain_terms, query, opts)
+        plain_terms = all_plain_terms if use_natural else None
 
         # 2. 纯词项自然语言查询：用与索引侧一致的分词器重写为带 IDF 权重的 OR 查询；
         #    结构化语法（字段/布尔/短语/括号/排序）继续走 AST 编译路径。
@@ -302,6 +304,36 @@ def _read_disk_file(path_str: str) -> str:
 
 
 _CJK_QUERY_RE = re.compile(r"[\u4e00-\u9fff]")
+# auto 模式下，<= 3 个内容词元的短查询保持 AND 精度；长句 / claim 走加权 OR。
+# SciFact 1109 条 query 的最小内容词元数为 4，因此该阈值不影响公开评测结论。
+_AUTO_STRUCTURED_MAX_CONTENT_TERMS = 3
+_NATURAL_CONNECTIVES = frozenset({"and", "or", "not"})
+_SENTENCE_END_RE = re.compile(r"[.!?。！？]\s*$")
+
+
+def _should_use_natural_query(
+    plain_terms: list[str] | None, raw_query: str, options: SearchOptions
+) -> bool:
+    """决定纯词项查询是走自然语言加权 OR 还是结构化 AND。
+
+    显式 ``natural_query`` 优先；否则按 ``query_mode`` 与 auto 启发式决定：
+    短关键词查询保留 AND 精度，长句 / claim 才使用 OR 召回。
+    """
+    if options.natural_query is not None:
+        return options.natural_query
+    if options.query_mode == "natural":
+        return True
+    if options.query_mode == "structured":
+        return False
+    if not plain_terms:
+        return False
+
+    content_terms = [t for t in plain_terms if t.lower() not in _NATURAL_CONNECTIVES]
+    if len(content_terms) <= _AUTO_STRUCTURED_MAX_CONTENT_TERMS and not _SENTENCE_END_RE.search(
+        raw_query
+    ):
+        return False
+    return True
 
 
 def _build_natural_query(

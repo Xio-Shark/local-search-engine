@@ -45,20 +45,32 @@ def test_natural_query_switch_or_and(tmp_path: Path) -> None:
     )
     engine = SearchEngine(index_dir)
 
-    natural = engine.search("alpha beta")
-    assert natural.total_matches == 3
-    assert Path(natural.hits[0].path).name == "both.txt"
+    # auto：短关键词查询保留 AND 精度
+    short_auto = engine.search("alpha beta")
+    assert short_auto.total_matches == 1
+    assert Path(short_auto.hits[0].path).name == "both.txt"
 
+    # auto：长查询自动切换为加权 OR
+    long_auto = engine.search("alpha beta gamma delta")
+    assert long_auto.total_matches == 3
+
+    # 显式强制自然 OR / 结构化 AND
+    natural = engine.search("alpha beta", options=SearchOptions(natural_query=True))
+    assert natural.total_matches == 3
     strict = engine.search(
         "alpha beta", options=SearchOptions(natural_query=False, conjunction_by_default=True)
     )
     assert strict.total_matches == 1
-    assert Path(strict.hits[0].path).name == "both.txt"
-
     old_or = engine.search(
         "alpha beta", options=SearchOptions(natural_query=False, conjunction_by_default=False)
     )
     assert old_or.total_matches == 3
+
+    # query_mode 字段等价可用
+    forced_natural = engine.search("alpha beta", options=SearchOptions(query_mode="natural"))
+    assert forced_natural.total_matches == 3
+    forced_structured = engine.search("alpha beta", options=SearchOptions(query_mode="structured"))
+    assert forced_structured.total_matches == 1
 
 
 def test_query_fields_switch(tmp_path: Path) -> None:
