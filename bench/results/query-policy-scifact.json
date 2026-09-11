@@ -1,0 +1,399 @@
+{
+  "dataset": "scifact",
+  "qrels_split": "train",
+  "docs": 5183,
+  "queries": 809,
+  "top_k": 100,
+  "deterministic_index": true,
+  "auto_structured_max_terms_default": 0,
+  "query_kinds": {
+    "plain": 809
+  },
+  "policies": {
+    "structured_and": {
+      "query_mode": "auto",
+      "natural_query": false,
+      "auto_structured_max_terms": 0,
+      "idf_power": 0.25,
+      "concept_expansion": true,
+      "conjunction_by_default": true,
+      "rank_only": true
+    },
+    "structured_or": {
+      "query_mode": "auto",
+      "natural_query": false,
+      "auto_structured_max_terms": 0,
+      "idf_power": 0.25,
+      "concept_expansion": true,
+      "conjunction_by_default": false,
+      "rank_only": true
+    },
+    "natural": {
+      "query_mode": "natural",
+      "natural_query": null,
+      "auto_structured_max_terms": 0,
+      "idf_power": 0.25,
+      "concept_expansion": true,
+      "conjunction_by_default": true,
+      "rank_only": true
+    },
+    "auto@0": {
+      "query_mode": "auto",
+      "natural_query": null,
+      "auto_structured_max_terms": 0,
+      "idf_power": 0.25,
+      "concept_expansion": true,
+      "conjunction_by_default": true,
+      "rank_only": true
+    },
+    "auto@1": {
+      "query_mode": "auto",
+      "natural_query": null,
+      "auto_structured_max_terms": 1,
+      "idf_power": 0.25,
+      "concept_expansion": true,
+      "conjunction_by_default": true,
+      "rank_only": true
+    },
+    "auto@2": {
+      "query_mode": "auto",
+      "natural_query": null,
+      "auto_structured_max_terms": 2,
+      "idf_power": 0.25,
+      "concept_expansion": true,
+      "conjunction_by_default": true,
+      "rank_only": true
+    },
+    "auto@3": {
+      "query_mode": "auto",
+      "natural_query": null,
+      "auto_structured_max_terms": 3,
+      "idf_power": 0.25,
+      "concept_expansion": true,
+      "conjunction_by_default": true,
+      "rank_only": true
+    },
+    "auto@4": {
+      "query_mode": "auto",
+      "natural_query": null,
+      "auto_structured_max_terms": 4,
+      "idf_power": 0.25,
+      "concept_expansion": true,
+      "conjunction_by_default": true,
+      "rank_only": true
+    },
+    "auto@5": {
+      "query_mode": "auto",
+      "natural_query": null,
+      "auto_structured_max_terms": 5,
+      "idf_power": 0.25,
+      "concept_expansion": true,
+      "conjunction_by_default": true,
+      "rank_only": true
+    },
+    "auto@6": {
+      "query_mode": "auto",
+      "natural_query": null,
+      "auto_structured_max_terms": 6,
+      "idf_power": 0.25,
+      "concept_expansion": true,
+      "conjunction_by_default": true,
+      "rank_only": true
+    },
+    "auto@8": {
+      "query_mode": "auto",
+      "natural_query": null,
+      "auto_structured_max_terms": 8,
+      "idf_power": 0.25,
+      "concept_expansion": true,
+      "conjunction_by_default": true,
+      "rank_only": true
+    },
+    "auto@12": {
+      "query_mode": "auto",
+      "natural_query": null,
+      "auto_structured_max_terms": 12,
+      "idf_power": 0.25,
+      "concept_expansion": true,
+      "conjunction_by_default": true,
+      "rank_only": true
+    }
+  },
+  "meta": {
+    "platform": "macOS-26.5.1-arm64-arm-64bit",
+    "python": "3.11.15",
+    "lse_version": "0.2.0",
+    "command": "bench/bench_query_policy.py --dataset scifact,nfcorpus,fiqa,cosqa --jobs 4 --include-tantivy --deterministic-index --output-json bench/results/query-policy-scifact.json --dataset scifact --jobs 1"
+  },
+  "significance": {
+    "structured_and_vs_natural": {
+      "queries": 809.0,
+      "mean_diff": -0.054098052141320754,
+      "ci_low": -0.07104651936177753,
+      "ci_high": -0.03731534556714669,
+      "wins": 88,
+      "losses": 167,
+      "ties": 554,
+      "samples": 2000.0,
+      "metric": "ndcg@10"
+    },
+    "structured_or_vs_natural": {
+      "queries": 809.0,
+      "mean_diff": -0.04179278156909465,
+      "ci_low": -0.05754499481897803,
+      "ci_high": -0.026009260167798313,
+      "wins": 91,
+      "losses": 157,
+      "ties": 561,
+      "samples": 2000.0,
+      "metric": "ndcg@10"
+    },
+    "auto@0_vs_natural": {
+      "queries": 809.0,
+      "mean_diff": 0.0,
+      "ci_low": 0.0,
+      "ci_high": 0.0,
+      "wins": 0,
+      "losses": 0,
+      "ties": 809,
+      "samples": 2000.0,
+      "metric": "ndcg@10"
+    },
+    "auto@1_vs_natural": {
+      "queries": 809.0,
+      "mean_diff": 0.0,
+      "ci_low": 0.0,
+      "ci_high": 0.0,
+      "wins": 0,
+      "losses": 0,
+      "ties": 809,
+      "samples": 2000.0,
+      "metric": "ndcg@10"
+    },
+    "auto@2_vs_natural": {
+      "queries": 809.0,
+      "mean_diff": 0.0,
+      "ci_low": 0.0,
+      "ci_high": 0.0,
+      "wins": 0,
+      "losses": 0,
+      "ties": 809,
+      "samples": 2000.0,
+      "metric": "ndcg@10"
+    },
+    "auto@3_vs_natural": {
+      "queries": 809.0,
+      "mean_diff": 0.0,
+      "ci_low": 0.0,
+      "ci_high": 0.0,
+      "wins": 0,
+      "losses": 0,
+      "ties": 809,
+      "samples": 2000.0,
+      "metric": "ndcg@10"
+    },
+    "auto@4_vs_natural": {
+      "queries": 809.0,
+      "mean_diff": 0.0,
+      "ci_low": 0.0,
+      "ci_high": 0.0,
+      "wins": 0,
+      "losses": 0,
+      "ties": 809,
+      "samples": 2000.0,
+      "metric": "ndcg@10"
+    },
+    "auto@5_vs_natural": {
+      "queries": 809.0,
+      "mean_diff": 0.0,
+      "ci_low": 0.0,
+      "ci_high": 0.0,
+      "wins": 0,
+      "losses": 0,
+      "ties": 809,
+      "samples": 2000.0,
+      "metric": "ndcg@10"
+    },
+    "auto@6_vs_natural": {
+      "queries": 809.0,
+      "mean_diff": 0.0,
+      "ci_low": 0.0,
+      "ci_high": 0.0,
+      "wins": 0,
+      "losses": 0,
+      "ties": 809,
+      "samples": 2000.0,
+      "metric": "ndcg@10"
+    },
+    "auto@8_vs_natural": {
+      "queries": 809.0,
+      "mean_diff": -0.00041203131437989287,
+      "ci_low": -0.0012360939431396785,
+      "ci_high": 0.0,
+      "wins": 0,
+      "losses": 1,
+      "ties": 808,
+      "samples": 2000.0,
+      "metric": "ndcg@10"
+    },
+    "auto@12_vs_natural": {
+      "queries": 809.0,
+      "mean_diff": -0.002127557300016079,
+      "ci_low": -0.005100124864322322,
+      "ci_high": -2.3226546293117602e-05,
+      "wins": 0,
+      "losses": 4,
+      "ties": 805,
+      "samples": 2000.0,
+      "metric": "ndcg@10"
+    }
+  },
+  "buckets": [
+    {
+      "bucket": "3",
+      "queries": 3,
+      "natural": 0.7956176024115139,
+      "structured_and": 0.6666666666666666,
+      "delta": 0.1289509357448472,
+      "a_win_rate": 0.3333333333333333
+    },
+    {
+      "bucket": "4",
+      "queries": 6,
+      "natural": 0.4384882922619096,
+      "structured_and": 0.3333333333333333,
+      "delta": 0.10515495892857629,
+      "a_win_rate": 0.16666666666666666
+    },
+    {
+      "bucket": "5",
+      "queries": 15,
+      "natural": 0.5841239671428611,
+      "structured_and": 0.5620451038715596,
+      "delta": 0.022078863271301447,
+      "a_win_rate": 0.13333333333333333
+    },
+    {
+      "bucket": "6+",
+      "queries": 785,
+      "natural": 0.6522580143933784,
+      "structured_and": 0.5982244364666871,
+      "delta": 0.054033577926691265,
+      "a_win_rate": 0.20764331210191084
+    }
+  ],
+  "timings": {
+    "dataset_load_s": 0.02888087509199977,
+    "materialize_s": 0.510005374904722,
+    "index_build_s": 1.6137782922014594,
+    "feature_extract_s": 0.012204708997160196,
+    "policy_eval_s": 9.041146374773234,
+    "total_s": 15.066796625033021
+  },
+  "results": {
+    "tantivy_bm25": {
+      "queries": 809.0,
+      "ndcg@10": 0.6313692385633194,
+      "recall@10": 0.7521425628347754,
+      "mrr@10": 0.6007578433103772,
+      "total_seconds": 0.14330783300101757,
+      "p50_ms": 0.1659579575061798
+    },
+    "structured_and": {
+      "queries": 809.0,
+      "ndcg@10": 0.5958428420079391,
+      "recall@10": 0.7130407911001235,
+      "mrr@10": 0.5650430670826219,
+      "total_seconds": 0.7331042499281466,
+      "p50_ms": 0.8122497238218784
+    },
+    "structured_or": {
+      "queries": 809.0,
+      "ndcg@10": 0.6081481125801653,
+      "recall@10": 0.7299340749896992,
+      "mrr@10": 0.575893225027959,
+      "total_seconds": 0.6823840825818479,
+      "p50_ms": 0.8006668649613857
+    },
+    "natural": {
+      "queries": 809.0,
+      "ndcg@10": 0.6499408941492594,
+      "recall@10": 0.7907704985578904,
+      "mrr@10": 0.611044891792728,
+      "total_seconds": 0.8637045002542436,
+      "p50_ms": 0.9284582920372486
+    },
+    "auto@0": {
+      "queries": 809.0,
+      "ndcg@10": 0.6499408941492594,
+      "recall@10": 0.7907704985578904,
+      "mrr@10": 0.611044891792728,
+      "total_seconds": 0.7035996671766043,
+      "p50_ms": 0.8204169571399689
+    },
+    "auto@1": {
+      "queries": 809.0,
+      "ndcg@10": 0.6499408941492594,
+      "recall@10": 0.7907704985578904,
+      "mrr@10": 0.611044891792728,
+      "total_seconds": 0.7584301251918077,
+      "p50_ms": 0.8224998600780964
+    },
+    "auto@2": {
+      "queries": 809.0,
+      "ndcg@10": 0.6499408941492594,
+      "recall@10": 0.7907704985578904,
+      "mrr@10": 0.611044891792728,
+      "total_seconds": 0.6600378747098148,
+      "p50_ms": 0.8068750612437725
+    },
+    "auto@3": {
+      "queries": 809.0,
+      "ndcg@10": 0.6499408941492594,
+      "recall@10": 0.7907704985578904,
+      "mrr@10": 0.611044891792728,
+      "total_seconds": 0.6769939591176808,
+      "p50_ms": 0.8265422657132149
+    },
+    "auto@4": {
+      "queries": 809.0,
+      "ndcg@10": 0.6499408941492594,
+      "recall@10": 0.7907704985578904,
+      "mrr@10": 0.611044891792728,
+      "total_seconds": 0.7053262498229742,
+      "p50_ms": 0.8651250973343849
+    },
+    "auto@5": {
+      "queries": 809.0,
+      "ndcg@10": 0.6499408941492594,
+      "recall@10": 0.7907704985578904,
+      "mrr@10": 0.611044891792728,
+      "total_seconds": 0.7929158327169716,
+      "p50_ms": 0.8996669203042984
+    },
+    "auto@6": {
+      "queries": 809.0,
+      "ndcg@10": 0.6499408941492594,
+      "recall@10": 0.7907704985578904,
+      "mrr@10": 0.611044891792728,
+      "total_seconds": 0.75545575004071,
+      "p50_ms": 0.8954997174441814
+    },
+    "auto@8": {
+      "queries": 809.0,
+      "ndcg@10": 0.6495288628348795,
+      "recall@10": 0.7895344046147508,
+      "mrr@10": 0.6108683069437081,
+      "total_seconds": 0.8646570420823991,
+      "p50_ms": 0.9771659970283508
+    },
+    "auto@12": {
+      "queries": 809.0,
+      "ndcg@10": 0.6478133368492434,
+      "recall@10": 0.788298310671611,
+      "mrr@10": 0.6090141660289986,
+      "total_seconds": 0.8445370411500335,
+      "p50_ms": 0.9335828945040703
+    }
+  }
+}
