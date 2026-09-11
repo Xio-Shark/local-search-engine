@@ -35,8 +35,9 @@ class IndexEngine:
     index_dir 默认 ~/Library/Application Support/lse/index 等平台目录。
     """
 
-    def __init__(self, index_dir: Path = DEFAULT_INDEX_DIR) -> None:
+    def __init__(self, index_dir: Path = DEFAULT_INDEX_DIR, deterministic: bool = False) -> None:
         self.index_dir = Path(index_dir)
+        self.deterministic = deterministic
         self.index_dir.mkdir(parents=True, exist_ok=True)
         self.schema = build_schema()
         try:
@@ -205,7 +206,11 @@ class IndexEngine:
         return unique
 
     def _write_batch(self, files: list[IndexableFile]) -> None:
-        writer_threads = 1 if len(files) < 1500 else min(2, os.cpu_count() or 2)
+        writer_threads = (
+            1
+            if self.deterministic or len(files) < 1500
+            else min(2, os.cpu_count() or 2)
+        )
         writer = self.index.writer(heap_size=128_000_000, num_threads=writer_threads)
         register_tokenizers(self.index)
 

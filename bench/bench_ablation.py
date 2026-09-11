@@ -76,6 +76,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--limit-queries", type=int, default=0)
     parser.add_argument("--variants", default="", help="逗号分隔的变体名，默认全部")
     parser.add_argument("--include-tantivy", action="store_true", help="同时运行原生 BM25 下界")
+    parser.add_argument(
+        "--deterministic-index",
+        action="store_true",
+        help="索引写入固定单线程，降低 segment 布局 / 并列排序造成的运行间波动",
+    )
     parser.add_argument("--output-json", type=Path, default=None)
     return parser.parse_args(argv)
 
@@ -116,7 +121,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         docs_dir, name_to_id = materialize_docs(docs, Path(tmp))
         if args.include_tantivy:
             print("running baseline=tantivy ...", file=sys.stderr)
-            retriever = TantivyBm25Retriever(docs, name_to_id)
+            retriever = TantivyBm25Retriever(
+                docs, name_to_id, deterministic=args.deterministic_index
+            )
             try:
                 results["tantivy_bm25"] = evaluate_retriever(
                     retriever, selected_queries, qrels, args.top_k
@@ -126,7 +133,12 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         for name in names:
             print(f"running variant={name} ...", file=sys.stderr)
-            retriever = LseRetriever(docs_dir, name_to_id, options=ABLATION_VARIANTS[name])
+            retriever = LseRetriever(
+                docs_dir,
+                name_to_id,
+                options=ABLATION_VARIANTS[name],
+                deterministic=args.deterministic_index,
+            )
             try:
                 results[name] = evaluate_retriever(retriever, selected_queries, qrels, args.top_k)
             finally:
@@ -149,6 +161,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "docs": len(docs),
         "queries": len(selected_queries),
         "top_k": args.top_k,
+        "deterministic_index": bool(args.deterministic_index),
         "meta": {
             "platform": platform.platform(),
             "python": sys.version.split()[0],
@@ -157,6 +170,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         },
         "variants": {
             name: {
+                "query_mode": options.query_mode,
                 "natural_query": options.natural_query,
                 "idf_power": options.idf_power,
                 "concept_expansion": options.concept_expansion,

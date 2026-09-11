@@ -24,7 +24,9 @@ import json
 import math
 import os
 import platform
+import random
 import shutil
+import statistics
 import subprocess
 import sys
 import tempfile
@@ -33,7 +35,7 @@ import urllib.request
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Sequence
+from typing import Any, Sequence
 
 from lse import __version__ as LSE_VERSION
 from lse.config import DEFAULT_SEARCH_FIELDS
@@ -218,11 +220,13 @@ def evaluate_retriever(
     queries: dict[str, str],
     qrels: dict[str, dict[str, float]],
     top_k: int,
-) -> dict[str, float]:
+    collect_per_query: bool = False,
+) -> dict[str, Any]:
     ndcg_scores: list[float] = []
     recall_scores: list[float] = []
     mrr_scores: list[float] = []
     latencies_ms: list[float] = []
+    per_query: dict[str, dict[str, float]] = {}
 
     started = time.perf_counter()
     for query_id, query_text in queries.items():
@@ -232,12 +236,17 @@ def evaluate_retriever(
         query_started = time.perf_counter()
         ranked = list(retriever.retrieve(query_text, top_k))
         latencies_ms.append((time.perf_counter() - query_started) * 1000.0)
-        ndcg_scores.append(ndcg_at_k(ranked, relevant, METRIC_K))
-        recall_scores.append(recall_at_k(ranked, relevant, METRIC_K))
-        mrr_scores.append(reciprocal_rank_at_k(ranked, relevant, METRIC_K))
+        ndcg = ndcg_at_k(ranked, relevant, METRIC_K)
+        recall = recall_at_k(ranked, relevant, METRIC_K)
+        mrr = reciprocal_rank_at_k(ranked, relevant, METRIC_K)
+        ndcg_scores.append(ndcg)
+        recall_scores.append(recall)
+        mrr_scores.append(mrr)
+        if collect_per_query:
+            per_query[query_id] = {"ndcg@10": ndcg, "recall@10": recall, "mrr@10": mrr}
 
     total_seconds = time.perf_counter() - started
-    return {
+    result: dict[str, Any] = {
         "queries": float(len(ndcg_scores)),
         "ndcg@10": sum(ndcg_scores) / len(ndcg_scores) if ndcg_scores else 0.0,
         "recall@10": sum(recall_scores) / len(recall_scores) if recall_scores else 0.0,
@@ -245,6 +254,83 @@ def evaluate_retriever(
         "total_seconds": total_seconds,
         "p50_ms": sorted(latencies_ms)[len(latencies_ms) // 2] if latencies_ms else 0.0,
     }
+    if collect_per_query:
+        result["per_query"] = per_query
+    return result
+
+
+def paired_bootstrap(
+    reference: dict[str, Any],
+    baseline: dict[str, Any],
+    metric: str = "ndcg@10",
+    samples: int = 2000,
+    seed: int = 42,
+) -> dict[str, Any]:
+    """对同一批 query 的指标差做 paired bootstrap，返回均值与 95% 置信区间。"""
+    ref = reference.get("per_query") or {}
+    base = baseline.get("per_query") or {}
+    common_ids = sorted(set(ref) & set(base))
+    if not common_ids:
+        return {"queries": 0.0, "mean_diff": 0.0, "ci_low": 0.0, "ci_high": 0.0,
+                "wins": 0, "losses": 0, "ties": 0, "samples": float(samples), "metric": metric}
+
+    diffs = [float(ref[qid][metric]) - float(base[qid][metric]) for qid in common_ids]
+    mean_diff = sum(diffs) / len(diffs)
+    wins = sum(1 for value in diffs if value > 1e-12)
+    losses = sum(1 for value in diffs if value < -1e-12)
+    ties = len(diffs) - wins - losses
+
+    rng = random.Random(seed)
+    n = len(diffs)
+    boot: list[float] = []
+    for _ in range(max(int(samples), 1)):
+        boot.append(sum(diffs[rng.randrange(n)] for _ in range(n)) / n)
+    boot.sort()
+    low_index = int(0.025 * (len(boot) - 1))
+    high_index = int(0.975 * (len(boot) - 1))
+    return {
+        "queries": float(n),
+        "mean_diff": mean_diff,
+        "ci_low": boot[low_index],
+        "ci_high": boot[high_index],
+        "wins": wins,
+        "losses": losses,
+        "ties": ties,
+        "samples": float(max(int(samples), 1)),
+        "metric": metric,
+    }
+
+
+def aggregate_runs(runs: list[dict[str, Any]]) -> dict[str, Any]:
+    """把同一配置的多次 benchmark 运行聚合成 mean ± std。"""
+    if not runs:
+        return {}
+    if len(runs) == 1:
+        return runs[0]
+
+    metric_keys = [key for key in runs[0] if key != "per_query"]
+    aggregated: dict[str, Any] = {
+        key: sum(float(run[key]) for run in runs) / len(runs) for key in metric_keys
+    }
+    aggregated["runs"] = float(len(runs))
+    aggregated["std"] = {
+        key: statistics.pstdev([float(run[key]) for run in runs]) for key in metric_keys
+    }
+
+    per_query_runs = [run.get("per_query") for run in runs]
+    if all(isinstance(item, dict) for item in per_query_runs):
+        common_ids = set(per_query_runs[0])
+        for item in per_query_runs[1:]:
+            common_ids &= set(item)
+        merged: dict[str, dict[str, float]] = {}
+        for query_id in sorted(common_ids):
+            metric_names = per_query_runs[0][query_id].keys()
+            merged[query_id] = {
+                name: sum(item[query_id][name] for item in per_query_runs) / len(per_query_runs)
+                for name in metric_names
+            }
+        aggregated["per_query"] = merged
+    return aggregated
 
 
 class LseRetriever:
@@ -255,10 +341,11 @@ class LseRetriever:
         docs_dir: Path,
         name_to_id: dict[str, str],
         options: SearchOptions | None = None,
+        deterministic: bool = False,
     ) -> None:
         self._tmp = Path(tempfile.mkdtemp(prefix="lse-public-"))
         self._index_dir = self._tmp / "index"
-        IndexEngine(self._index_dir).build([docs_dir])
+        IndexEngine(self._index_dir, deterministic=deterministic).build([docs_dir])
         self._engine = SearchEngine(self._index_dir, options=options)
         self._name_to_id = name_to_id
 
@@ -278,7 +365,12 @@ class LseRetriever:
 class TantivyBm25Retriever:
     name = "tantivy_bm25"
 
-    def __init__(self, docs: Sequence[EvalDoc], name_to_id: dict[str, str]) -> None:
+    def __init__(
+        self,
+        docs: Sequence[EvalDoc],
+        name_to_id: dict[str, str],
+        deterministic: bool = False,
+    ) -> None:
         import tantivy
 
         self._tmp = Path(tempfile.mkdtemp(prefix="lse-tantivy-"))
@@ -289,7 +381,11 @@ class TantivyBm25Retriever:
         builder.add_text_field("title", stored=False)
         builder.add_text_field("body", stored=False)
         self._index = tantivy.Index(builder.build(), str(index_dir))
-        writer = self._index.writer()
+        writer = (
+            self._index.writer(num_threads=1)
+            if deterministic
+            else self._index.writer()
+        )
         for doc in docs:
             writer.add_document(
                 tantivy.Document.from_dict(
@@ -365,11 +461,14 @@ def build_retriever(
     docs_dir: Path,
     name_to_id: dict[str, str],
     lse_options: SearchOptions | None = None,
+    deterministic: bool = False,
 ):
     if name == "lse":
-        return LseRetriever(docs_dir, name_to_id, options=lse_options)
+        return LseRetriever(
+            docs_dir, name_to_id, options=lse_options, deterministic=deterministic
+        )
     if name == "tantivy":
-        return TantivyBm25Retriever(docs, name_to_id)
+        return TantivyBm25Retriever(docs, name_to_id, deterministic=deterministic)
     if name == "ripgrep":
         return RipgrepCountRetriever(docs_dir, name_to_id)
     raise ValueError(f"unknown baseline: {name}")
@@ -388,14 +487,37 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         choices=("test", "valid", "train", "all"),
         help="BEIR: test/train/all；CoIR: test/valid/train/all。dev 调参用 train/valid，最终报告用 test。",
     )
+    parser.add_argument("--repeat", type=int, default=1, help="重复评测次数，>1 时报告 mean ± std")
+    parser.add_argument(
+        "--deterministic-index",
+        action="store_true",
+        help="索引写入固定单线程，降低 segment 布局 / 并列排序造成的运行间波动",
+    )
+    parser.add_argument(
+        "--bootstrap-samples",
+        type=int,
+        default=2000,
+        help="lse vs 各 baseline 的 paired bootstrap 重采样次数；0 关闭",
+    )
+    parser.add_argument(
+        "--bootstrap-metric",
+        choices=("ndcg@10", "recall@10", "mrr@10"),
+        default="ndcg@10",
+        help="paired bootstrap 使用的指标",
+    )
+    parser.add_argument(
+        "--include-per-query",
+        action="store_true",
+        help="在 output JSON 中保存每个 query 的指标；默认只存聚合值与显著性",
+    )
     parser.add_argument("--output-json", type=Path, default=None)
 
     lse_group = parser.add_argument_group("lse query options")
     lse_group.add_argument(
         "--lse-query-mode",
-        choices=("natural", "structured"),
-        default="natural",
-        help="natural: 纯词项查询走分词对齐 + 加权 OR；structured: 旧 AST + 默认 AND。",
+        choices=("auto", "natural", "structured"),
+        default="auto",
+        help="auto: 短关键词 AND / 长句加权 OR；natural: 强制自然 OR；structured: 旧 AST + 默认 AND。",
     )
     lse_group.add_argument("--lse-idf-power", type=float, default=0.25, help="自然查询词项 IDF 权重指数（默认 0.25）")
     lse_group.add_argument("--lse-no-idf", action="store_true", help="关闭自然查询中的 IDF 词项加权")
@@ -418,7 +540,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 def search_options_from_args(args: argparse.Namespace) -> SearchOptions:
     fields = tuple(field.strip() for field in args.lse_fields.split(",") if field.strip())
     return SearchOptions(
-        natural_query=args.lse_query_mode == "natural",
+        query_mode=args.lse_query_mode,
         idf_power=None if args.lse_no_idf else args.lse_idf_power,
         concept_expansion=args.lse_concept_expansion,
         query_fields=fields or DEFAULT_SEARCH_FIELDS,
@@ -429,6 +551,7 @@ def search_options_from_args(args: argparse.Namespace) -> SearchOptions:
 def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
     lse_options = search_options_from_args(args)
+    repeat = max(args.repeat, 1)
     try:
         docs, queries, qrels = load_dataset(args.dataset, args.cache_dir, args.qrels_split)
     except (FileNotFoundError, RuntimeError, ValueError, OSError) as error:
@@ -441,31 +564,78 @@ def main(argv: Sequence[str] | None = None) -> int:
     selected_queries = {query_id: queries[query_id] for query_id in query_ids}
 
     print(f"dataset={args.dataset} split={args.qrels_split} docs={len(docs)} "
-          f"queries={len(selected_queries)} qrels_queries={len(qrels)} top_k={args.top_k}")
+          f"queries={len(selected_queries)} qrels_queries={len(qrels)} "
+          f"top_k={args.top_k} repeat={repeat}")
 
+    retriever_names = [name.strip() for name in args.baselines.split(",") if name.strip()]
+    runs: dict[str, list[dict[str, Any]]] = {}
     with tempfile.TemporaryDirectory(prefix=f"lse-bench-{args.dataset}-") as tmp:
         workdir = Path(tmp)
         docs_dir, name_to_id = materialize_docs(docs, workdir)
-        results: dict[str, dict[str, float]] = {}
-        retriever_names = [name.strip() for name in args.baselines.split(",") if name.strip()]
-        for name in retriever_names:
-            print(f"running baseline={name} ...", file=sys.stderr)
-            retriever = build_retriever(name, docs, docs_dir, name_to_id, lse_options)
-            try:
-                results[name] = evaluate_retriever(
-                    retriever, selected_queries, qrels, args.top_k
+        for repetition in range(repeat):
+            for name in retriever_names:
+                label = name if repeat == 1 else f"{name} ({repetition + 1}/{repeat})"
+                print(f"running baseline={label} ...", file=sys.stderr)
+                retriever = build_retriever(
+                    name,
+                    docs,
+                    docs_dir,
+                    name_to_id,
+                    lse_options,
+                    deterministic=args.deterministic_index,
                 )
-            finally:
-                retriever.close()
+                try:
+                    metrics = evaluate_retriever(
+                        retriever,
+                        selected_queries,
+                        qrels,
+                        args.top_k,
+                        collect_per_query=True,
+                    )
+                finally:
+                    retriever.close()
+                runs.setdefault(name, []).append(metrics)
+
+    results: dict[str, dict[str, Any]] = {
+        name: aggregate_runs(name_runs) for name, name_runs in runs.items()
+    }
+
+    significance: dict[str, dict[str, Any]] = {}
+    if "lse" in results and args.bootstrap_samples > 0:
+        for name in retriever_names:
+            if name == "lse" or name not in results:
+                continue
+            significance[f"lse_vs_{name}"] = paired_bootstrap(
+                results["lse"],
+                results[name],
+                metric=args.bootstrap_metric,
+                samples=args.bootstrap_samples,
+            )
 
     print("")
     print(f"{'baseline':<16} {'nDCG@10':>10} {'Recall@10':>10} {'MRR@10':>10} {'p50 ms':>10} {'total s':>10}")
     print("-" * 72)
-    for name in results:
-        metrics = results[name]
+    for name, metrics in results.items():
         print(f"{name:<16} {metrics['ndcg@10']:>10.4f} {metrics['recall@10']:>10.4f} "
               f"{metrics['mrr@10']:>10.4f} {metrics['p50_ms']:>10.2f} "
               f"{metrics['total_seconds']:>10.2f}")
+
+    if significance:
+        print("")
+        print(f"paired bootstrap ({args.bootstrap_metric}, {args.bootstrap_samples} samples):")
+        for key, stats in significance.items():
+            print(
+                f"{key:<24} mean_diff={stats['mean_diff']:+.4f} "
+                f"95%CI=[{stats['ci_low']:+.4f}, {stats['ci_high']:+.4f}] "
+                f"W/L/T={stats['wins']}/{stats['losses']}/{stats['ties']}"
+            )
+
+    public_results = {
+        name: {key: value for key, value in metrics.items() if key != "per_query"}
+        for name, metrics in results.items()
+    }
+    if args.include_per_query:
+        public_results = results
 
     payload = {
         "dataset": args.dataset,
@@ -473,7 +643,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         "docs": len(docs),
         "queries": len(selected_queries),
         "top_k": args.top_k,
+        "repeat": repeat,
+        "deterministic_index": bool(args.deterministic_index),
         "lse_options": {
+            "query_mode": lse_options.query_mode,
             "natural_query": lse_options.natural_query,
             "idf_power": lse_options.idf_power,
             "concept_expansion": lse_options.concept_expansion,
@@ -486,15 +659,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             "lse_version": LSE_VERSION,
             "command": " ".join(sys.argv),
         },
-        "results": results,
+        "significance": significance,
+        "results": public_results,
     }
     if args.output_json is not None:
         args.output_json.parent.mkdir(parents=True, exist_ok=True)
         args.output_json.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
         print(f"\nwrote {args.output_json}")
     return 0
-
-
 
 
 def coir_file_spec(dataset: str, split: str = "test") -> tuple[str, str, str, str]:
