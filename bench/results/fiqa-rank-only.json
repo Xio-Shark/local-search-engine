@@ -12,8 +12,9 @@
     "seed": 42
   },
   "lse_options": {
-    "query_mode": "natural",
+    "query_mode": "auto",
     "natural_query": null,
+    "auto_structured_max_terms": 0,
     "idf_power": 0.25,
     "concept_expansion": true,
     "query_fields": [
@@ -22,14 +23,14 @@
       "path"
     ],
     "conjunction_by_default": true,
-    "include_spans": true,
-    "rank_only": false
+    "include_spans": false,
+    "rank_only": true
   },
   "meta": {
     "platform": "macOS-26.5.1-arm64-arm-64bit",
     "python": "3.11.15",
     "lse_version": "0.2.0",
-    "command": "bench/bench_public.py --dataset fiqa --baselines lse,tantivy --lse-query-mode natural --deterministic-index --bootstrap-samples 5000 --output-json bench/results/fiqa-natural.json"
+    "command": "bench/bench_public.py --dataset fiqa --baselines lse,tantivy --lse-rank-only --deterministic-index --bootstrap-samples 5000 --output-json bench/results/fiqa-rank-only.json"
   },
   "significance": {
     "lse_vs_tantivy": {
@@ -50,16 +51,16 @@
       "ndcg@10": 0.22970667103733103,
       "recall@10": 0.29412537051425947,
       "mrr@10": 0.28212999706055253,
-      "total_seconds": 10.03759887535125,
-      "p50_ms": 14.426209032535553
+      "total_seconds": 0.7665551248937845,
+      "p50_ms": 1.171292271465063
     },
     "tantivy": {
       "queries": 648.0,
       "ndcg@10": 0.23360744914061998,
       "recall@10": 0.2946592759092759,
       "mrr@10": 0.2946851116990006,
-      "total_seconds": 0.39434462506324053,
-      "p50_ms": 0.590374693274498
+      "total_seconds": 0.3682086253538728,
+      "p50_ms": 0.5498328246176243
     }
   }
 }

@@ -12,8 +12,9 @@
     "seed": 42
   },
   "lse_options": {
-    "query_mode": "natural",
+    "query_mode": "auto",
     "natural_query": null,
+    "auto_structured_max_terms": 0,
     "idf_power": 0.25,
     "concept_expansion": true,
     "query_fields": [
@@ -22,14 +23,14 @@
       "path"
     ],
     "conjunction_by_default": true,
-    "include_spans": true,
-    "rank_only": false
+    "include_spans": false,
+    "rank_only": true
   },
   "meta": {
     "platform": "macOS-26.5.1-arm64-arm-64bit",
     "python": "3.11.15",
     "lse_version": "0.2.0",
-    "command": "bench/bench_public.py --dataset nfcorpus --baselines lse,tantivy --lse-query-mode natural --deterministic-index --bootstrap-samples 5000 --output-json bench/results/nfcorpus-natural.json"
+    "command": "bench/bench_public.py --dataset nfcorpus --baselines lse,tantivy --lse-rank-only --deterministic-index --bootstrap-samples 5000 --output-json bench/results/nfcorpus-rank-only.json"
   },
   "significance": {
     "lse_vs_tantivy": {
@@ -50,16 +51,16 @@
       "ndcg@10": 0.30608215658760746,
       "recall@10": 0.1501493559551032,
       "mrr@10": 0.5099525775222368,
-      "total_seconds": 2.45595395937562,
-      "p50_ms": 8.997499942779541
+      "total_seconds": 0.13793549966067076,
+      "p50_ms": 0.5591250956058502
     },
     "tantivy": {
       "queries": 323.0,
       "ndcg@10": 0.299402046646843,
       "recall@10": 0.14528747736636036,
       "mrr@10": 0.4988021524399233,
-      "total_seconds": 0.019929999951273203,
-      "p50_ms": 0.06225006654858589
+      "total_seconds": 0.019588917028158903,
+      "p50_ms": 0.062166713178157806
     }
   }
 }
