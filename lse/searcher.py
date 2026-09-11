@@ -352,9 +352,6 @@ def _read_disk_file(path_str: str) -> str:
 
 
 _CJK_QUERY_RE = re.compile(r"[\u4e00-\u9fff]")
-# auto 模式下，<= 3 个内容词元的短查询保持 AND 精度；长句 / claim 走加权 OR。
-# SciFact 1109 条 query 的最小内容词元数为 4，因此该阈值不影响公开评测结论。
-_AUTO_STRUCTURED_MAX_CONTENT_TERMS = 3
 _NATURAL_CONNECTIVES = frozenset({"and", "or", "not"})
 _SENTENCE_END_RE = re.compile(r"[.!?。！？]\s*$")
 # 代码查询启发式：CSN / CoIR 的 query 是完整函数或类片段，整段通常包含
@@ -389,7 +386,8 @@ def _should_use_natural_query(
     """决定纯词项查询是走自然语言加权 OR 还是结构化 AND。
 
     显式 ``natural_query`` 优先；否则按 ``query_mode`` 与 auto 启发式决定：
-    短关键词查询保留 AND 精度，长句 / claim 才使用 OR 召回。
+    ``auto_structured_max_terms`` 以内的短查询才走 AND，该阈值默认 0
+    （即纯词项查询一律 OR，dev split 扫描结论见 bench/PUBLIC_EVAL.md）。
     """
     if options.natural_query is not None:
         return options.natural_query
@@ -401,7 +399,7 @@ def _should_use_natural_query(
         return False
 
     content_terms = [t for t in plain_terms if t.lower() not in _NATURAL_CONNECTIVES]
-    if len(content_terms) <= _AUTO_STRUCTURED_MAX_CONTENT_TERMS and not _SENTENCE_END_RE.search(
+    if len(content_terms) <= options.auto_structured_max_terms and not _SENTENCE_END_RE.search(
         raw_query
     ):
         return False

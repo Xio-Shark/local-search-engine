@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from lse.indexer import IndexEngine
 from lse.options import SearchOptions
 from lse.query_ast import QueryCompiler
@@ -59,12 +61,11 @@ def test_natural_query_switch_or_and(tmp_path: Path) -> None:
     )
     engine = SearchEngine(index_dir)
 
-    # auto：短关键词查询保留 AND 精度
+    # auto：纯词项查询默认走自然 OR（短查询 AND 阈值 dev split 选择为 0）
     short_auto = engine.search("alpha beta")
-    assert short_auto.total_matches == 1
-    assert Path(short_auto.hits[0].path).name == "both.txt"
+    assert short_auto.total_matches == 3
 
-    # auto：长查询自动切换为加权 OR
+    # auto：长查询同样走加权 OR
     long_auto = engine.search("alpha beta gamma delta")
     assert long_auto.total_matches == 3
 
@@ -85,6 +86,35 @@ def test_natural_query_switch_or_and(tmp_path: Path) -> None:
     assert forced_natural.total_matches == 3
     forced_structured = engine.search("alpha beta", options=SearchOptions(query_mode="structured"))
     assert forced_structured.total_matches == 1
+
+
+def test_auto_structured_max_terms_switch(tmp_path: Path) -> None:
+    """auto 短查询 AND 阈值可调；0 表示 auto 不再对纯词项查询使用 AND。"""
+    index_dir = _build_index(
+        tmp_path,
+        {
+            "both.txt": "alpha beta gamma",
+            "alpha.txt": "alpha only",
+            "beta.txt": "beta only",
+        },
+    )
+    engine = SearchEngine(index_dir)
+
+    # 阈值 0：短查询也不再 AND，召回全部单关键词文档
+    always_natural = engine.search(
+        "alpha beta gamma", options=SearchOptions(auto_structured_max_terms=0)
+    )
+    assert always_natural.total_matches == 3
+
+    # 抬高阈值：同样三个词改回 AND，只剩同时命中的文档
+    raised = engine.search(
+        "alpha beta gamma", options=SearchOptions(auto_structured_max_terms=6)
+    )
+    assert raised.total_matches == 1
+
+    # 负阈值是无效配置，直接失败而不是静默当作 0
+    with pytest.raises(ValueError):
+        SearchOptions(auto_structured_max_terms=-1)
 
 
 def test_query_fields_switch(tmp_path: Path) -> None:
