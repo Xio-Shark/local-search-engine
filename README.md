@@ -188,9 +188,14 @@ CI 跨 0。**没有数据集再出现显著负 gap，但也不足以宣称通用
 残余负 gap 已按 §2.4 的旋钮诊断定位：概念展开与查询字段逐位无影响，
 唯一有效的是 IDF 幂次，且最优值随 query 形态变化——Arguana（全部 >160
 字符的长论据 query）用 `IDF^1.0` 可把 gap 从 -0.0055 翻正到 +0.0017，
-四个 dev split 则一致支持当前的 `0.25`。因此这是打分权重的 profile 问题，
-不是缺少 reranker / tree-sitter 能力；长度自适应 IDF 需要带 train split
-的长 query 数据集才能验证，本轮不改默认值。
+四个 dev split 则一致支持当前的 `0.25`。
+
+实验 A（§2.5）已把“长 query 用更高 IDF 幂次”做成默认关闭的开关并完整验证：
+阈值 ≥160 时三个 dev split 逐位不变、SciFact 中性，Arguana 两个半集独立
+显著（+0.0078 / +0.0065）；但同一条规则让 CodeSearchNet 采样从 0.9451 掉到
+0.9373、相对 native BM25 由持平变为显著劣化（-0.0080）。长度单维度无法区分
+长论据与长代码片段，**规则不进入默认值**。因此这不是缺 reranker / tree-sitter
+能力的问题；再往前推进需要带 train qrels 的长 prose 语料。
 
 完整消融、缓存 / 延迟对比、统计方法、复现命令与原始 JSON 见
 [bench/PUBLIC_EVAL.md](bench/PUBLIC_EVAL.md)。

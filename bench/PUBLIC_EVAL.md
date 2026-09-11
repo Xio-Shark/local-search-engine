@@ -228,6 +228,83 @@ nDCG@10（`natural` = 当前默认 IDF^0.25 + 概念展开 + content,filename,pa
    split 间波动；FiQA 的旋钮结论（0.25 最优、1.0 显著更差）在两个
    split 上一致。
 
+### 2.5 长度分段 IDF 的可行性验证（实验 A）
+
+§2.4 的结论是“长 query 需要更高的 IDF 幂次”。本节的实验把它做成一条
+可配置规则并验证：query 字符数 > `idf_power_long_chars` 时改用
+`idf_power_long`，阈值以下保持 `idf_power`。规则默认关闭
+（`idf_power_long=None`，逐位等价于旧行为，有单测覆盖）。
+
+```bash
+# 1) 四个 dev split 回归：阈值是否只在长 query 上生效
+uv run --extra eval python bench/bench_query_policy.py \
+  --dataset scifact,nfcorpus,fiqa,cosqa --jobs 4 --suite length \
+  --include-tantivy --deterministic-index \
+  --output-json "bench/results/length-probe-{dataset}.json"
+
+# 2) Arguana 全量 + A/B（A 选规则 / B 报告；切分按 query id + 固定种子）
+for sub in all a b; do
+  uv run --extra eval python bench/bench_query_policy.py \
+    --dataset arguana --qrels-split test --suite length --query-subset "$sub" \
+    --include-tantivy --deterministic-index \
+    --output-json "bench/results/length-arguana-$sub.json"
+done
+
+# 3) 代码检索连带影响：同一 20k/2k 固定种子采样
+uv run --extra eval python bench/bench_public.py \
+  --dataset codesearchnet-python --sample-docs 20000 --sample-queries 2000 --seed 42 \
+  --baselines lse,tantivy --deterministic-index --repeat 3 --bootstrap-samples 5000 \
+  --lse-rank-only --lse-idf-long 1.0 --lse-idf-long-chars 160 \
+  --output-json bench/results/length-codesearchnet-python-sample.json
+```
+
+**1) dev 回归**（delta vs `natural`，nDCG@10）：
+
+| 数据集 | >160 字符 query | `len100_idf100` | `len160_idf050` | `len160_idf100` | `len240_idf100` |
+| :--- | ---: | ---: | ---: | ---: | ---: |
+| SciFact train | 18 / 809 | -0.0036 | -0.0000 | -0.0003 | +0.0002 |
+| NFCorpus train | 0 / 2590 | -0.0001 | +0.0000 | **+0.0000** | +0.0000 |
+| FiQA train | 0 / 5500 | **-0.0017** | +0.0000 | **+0.0000** | +0.0000 |
+| CosQA valid | 0 / 500 | +0.0000 | +0.0000 | **+0.0000** | +0.0000 |
+
+阈值 160 / 240 时 NFCorpus、FiQA、CosQA **逐位相同**（W/L/T = 0/0/N），
+SciFact 只有 18 条长 query 受影响且中性（-0.0003，CI [-0.0015, +0.0004]）。
+阈值 100 会把 FiQA 的 81–160 字符 query 拖进长 query 分支，造成
+**-0.0017 的显著回归**——阈值必须 ≥ 160，这由 dev split 的长度分布决定，
+与 test 集无关。
+
+**2) Arguana 全量 / A / B**（1,406 条 query 全部 >160 字符）：
+
+| 策略 | full（1406） | A（703） | B（703） |
+| :--- | ---: | ---: | ---: |
+| `natural`（IDF^0.25） | 0.3097 | 0.3243 | 0.2951 |
+| native Tantivy BM25 | 0.3152 | 0.3235 | 0.3070 |
+| `len160_idf050` | 0.3124（+0.0027） | 0.3264（+0.0021） | 0.2984（+0.0033） |
+| `len160_idf100` | **0.3169（+0.0072）** | **0.3321（+0.0078）** | **0.3016（+0.0065）** |
+| vs native：`natural` → `len160_idf100` | -0.0055 → **+0.0017** | -0.0009 → **+0.0086** | -0.0119 → -0.0054 |
+
+两个半集独立显著（A：CI [+0.0013, +0.0142]；B：CI [+0.0002, +0.0133]），
+全量 gap 翻正，说明收益不是少数 query 的偶然。
+
+**3) 代码检索连带影响（决定性）**：99% 的 CodeSearchNet query 超过
+160 字符（p50 = 624），规则会覆盖几乎全部代码 query：
+
+| 口径 | CSN 采样 lse nDCG@10 | lse vs native BM25 |
+| :--- | ---: | ---: |
+| 规则关闭（当前默认） | **0.9451** | -0.0002，CI [-0.0059, +0.0056] |
+| 规则开启（>160 字符 IDF^1.0） | 0.9373 | **-0.0080，CI [-0.0149, -0.0014]** |
+
+**结论：规则不进入默认值。** 长度是单一维度，同一个“>160 字符”桶里同时
+装着长论据（Arguana，规则 +0.0072）和长代码片段（CSN，规则 -0.0078 并把
+相对 native BM25 的关系从持平变成显著劣化）。把代码 query 排除在外确实能
+让两个数据集都好看，但那样剩下的唯一证据就是 Arguana 这个没有 train qrels
+的最终报告集——属于对着 test 调参。因此：
+
+- `SearchOptions.idf_power_long` / `idf_power_long_chars` 保留为**默认关闭**
+  的实验开关，`bench_public.py --lse-idf-long/--lse-idf-long-chars` 可复现；
+- 在拿到带 train qrels 的长 prose 语料（HotpotQA / FEVER 量级，见 §6）之前
+  不再推进这条线，也不会上 reranker / tree-sitter 来掩盖这 0.005 的差距。
+
 ## 3. 最终 test split 结果
 
 ### 3.1 SciFact test（300 q）
@@ -450,7 +527,14 @@ tokenizer / IDF 编译。
    系统性反转。FiQA / Arguana 的残余负 gap 已定位到 IDF 幂次与
    query 长度形态（§2.4）：概念展开、查询字段逐位无影响；Arguana 上
    `IDF^1.0` 可把 gap 翻正，但该数据集没有 train qrels，无法在 dev 上
-   验证“按长度切换 IDF 幂次”的 profile，因此本轮不改默认值。
+   验证“按长度切换 IDF 幂次”的 profile。
+2b. 实验 A 已把该 profile 做成默认关闭的开关并验证（§2.5）：阈值 ≥160 时
+   三个 dev split 逐位不变、SciFact 中性，Arguana 两个半集独立显著
+   （+0.0078 / +0.0065），但同一条规则在 CodeSearchNet 采样上把代码检索
+   从 0.9451 压到 0.9373、相对 native BM25 由持平变为**显著劣化**
+   （-0.0080，CI [-0.0149, -0.0014]）。长度单维度无法区分长论据与长代码
+   片段，因此规则不进入默认值；要合法地把它变成默认值，需要一个带
+   train qrels 的长 prose 语料（HotpotQA / FEVER 量级，约 5M 文档）。
 3. 当前不 bump 0.3.0 / 打 tag / 走 release workflow：C1 已无“显著劣于
    native BM25”的数据集，但正 gap 只在 SciFact 显著，证据强度不足以支撑
    一次版本发布。残余量级已收敛到 ≤0.0055 nDCG 且定位在打分权重层面，
