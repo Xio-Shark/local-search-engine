@@ -38,6 +38,27 @@ def resolve_jobs(requested: int, datasets: Sequence[str]) -> int:
     return min(len(datasets), DEFAULT_MAX_JOBS)
 
 
+def sanitize_command(argv: Sequence[str]) -> str:
+    """把 argv 渲染成可复现命令，同时抹掉本地绝对路径。
+
+    benchmark JSON 的 ``meta.command`` 会随仓库公开发布，直接记录
+    ``/Users/<name>/...`` 会泄露用户名与私有目录布局：仓库内的绝对路径
+    转成相对路径，仓库外的绝对路径只保留 basename。
+    """
+    root = Path(__file__).resolve().parents[1]
+    parts: list[str] = []
+    for raw in argv:
+        text = str(raw)
+        candidate = Path(text)
+        if candidate.is_absolute():
+            try:
+                text = str(candidate.resolve().relative_to(root))
+            except (OSError, ValueError):
+                text = candidate.name
+        parts.append(text)
+    return " ".join(parts)
+
+
 def child_argv(argv: Sequence[str], dataset: str) -> list[str]:
     """构造单个数据集的子进程参数。
 

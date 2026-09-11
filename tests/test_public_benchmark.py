@@ -180,6 +180,18 @@ def test_length_suite_and_query_subset() -> None:
     assert select_query_subset(query_ids, "all") == query_ids
 
 
+def test_sanitize_command_redacts_local_paths() -> None:
+    from bench.parallel import sanitize_command
+
+    root = Path(__file__).resolve().parents[1]
+    rendered = sanitize_command([str(root / "bench" / "bench_public.py"), "--dataset", "scifact"])
+    assert rendered == "bench/bench_public.py --dataset scifact"
+    assert "/Users/" not in rendered and "Desktop" not in rendered
+
+    # 仓库外的绝对路径只保留 basename，避免泄露私有目录布局
+    assert sanitize_command(["/opt/private/tool.py", "--flag"]) == "tool.py --flag"
+
+
 class _FakeBatch:
     def __init__(self, rows):
         self._rows = rows

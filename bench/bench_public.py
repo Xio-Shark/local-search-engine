@@ -46,6 +46,7 @@ from bench.parallel import (  # noqa: E402
     DATASET_PLACEHOLDER,
     resolve_jobs,
     run_parallel,
+    sanitize_command,
     split_datasets,
 )
 from lse import __version__ as LSE_VERSION  # noqa: E402
@@ -768,7 +769,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             "platform": platform.platform(),
             "python": sys.version.split()[0],
             "lse_version": LSE_VERSION,
-            "command": " ".join(sys.argv),
+            "command": sanitize_command(sys.argv),
         },
         "significance": significance,
         "results": public_results,
