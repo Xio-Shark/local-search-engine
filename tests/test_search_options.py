@@ -7,7 +7,7 @@ from pathlib import Path
 from lse.indexer import IndexEngine
 from lse.options import SearchOptions
 from lse.query_ast import QueryCompiler
-from lse.searcher import SearchEngine
+from lse.searcher import SearchEngine, _looks_like_code_query
 
 
 def _build_index(tmp_path: Path, files: dict[str, str]) -> Path:
@@ -115,3 +115,70 @@ def test_idf_weighting_can_be_disabled(tmp_path: Path) -> None:
     unweighted = engine.search("rare common", options=SearchOptions(idf_power=None))
     assert weighted.total_matches == 1
     assert unweighted.total_matches == 1
+
+
+def test_include_spans_false_matches_full_order_and_skips_disk_read(
+    tmp_path: Path, monkeypatch
+) -> None:
+    index_dir = _build_index(
+        tmp_path,
+        {
+            "alpha.txt": "alpha beta gamma delta",
+            "other.txt": "alpha only",
+        },
+    )
+    engine = SearchEngine(index_dir)
+    query = "alpha beta"
+
+    full = engine.search(query, options=SearchOptions(query_mode="structured"))
+    bare = engine.search(
+        query,
+        options=SearchOptions(query_mode="structured", include_spans=False),
+    )
+
+    assert full.total_matches == bare.total_matches
+    assert [h.path for h in full.hits] == [h.path for h in bare.hits]
+    assert [h.score for h in full.hits] == [h.score for h in bare.hits]
+    assert all(h.spans and h.snippets for h in full.hits)
+    assert all(h.spans == [] and h.snippets == [] for h in bare.hits)
+
+    import lse.searcher as searcher_module
+
+    def _fail(*args, **kwargs):
+        raise AssertionError("rank-only must not read files or compute spans")
+
+    monkeypatch.setattr(searcher_module, "_read_disk_file", _fail)
+    monkeypatch.setattr(searcher_module, "extract_evidence_spans", _fail)
+    rank_only = engine.search(
+        query,
+        options=SearchOptions(query_mode="structured", include_spans=False),
+    )
+    assert [h.path for h in rank_only.hits] == [h.path for h in full.hits]
+
+def test_code_query_heuristic_avoids_natural_language_false_positives() -> None:
+    assert _looks_like_code_query("def get_conn(self):\n    return conn")
+    assert _looks_like_code_query("async def fetch(session):\n    ...")
+    assert not _looks_like_code_query("using h5py in python 3")
+    assert not _looks_like_code_query("type hinting python style")
+    assert not _looks_like_code_query("static int inside python function")
+
+
+def test_code_query_with_quotes_and_colons_uses_natural_terms(tmp_path: Path) -> None:
+    index_dir = _build_index(
+        tmp_path,
+        {
+            "code.py": "def get_conn(self):\n    return 'verticaql connection object'\n",
+            "other.txt": "unrelated prose only",
+        },
+    )
+    engine = SearchEngine(index_dir)
+    query = 'def get_conn(self):\n    return "verticaql connection object"'
+
+    assert _looks_like_code_query(query)
+    result = engine.search(
+        query,
+        options=SearchOptions(include_spans=False),
+    )
+
+    assert result.total_matches >= 1
+    assert Path(result.hits[0].path).name == "code.py"

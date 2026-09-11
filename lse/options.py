@@ -32,6 +32,9 @@ class SearchOptions:
             （仅扩展召回，自然查询与结构化查询均会生效）。
         query_fields: 传给 Tantivy query parser 的默认搜索字段。
         conjunction_by_default: 结构化查询的默认连接语义（默认 AND）。
+        include_spans: 是否读取正文并计算 evidence span / snippet。设为
+            ``False`` 时只返回排序所需的文件元数据，用于 Agent 预筛与
+            原生 BM25 同口径的延迟基准；排序结果本身不受影响。
     """
 
     query_mode: Literal["auto", "natural", "structured"] = "auto"
@@ -40,3 +43,4 @@ class SearchOptions:
     concept_expansion: bool = True
     query_fields: tuple[str, ...] = DEFAULT_SEARCH_FIELDS
     conjunction_by_default: bool = True
+    include_spans: bool = True

@@ -70,8 +70,17 @@ class SearchEngine:
             query, concept_map=concept_map, expand_concepts=opts.concept_expansion
         )
         all_plain_terms = compiler.plain_terms()
-        use_natural = _should_use_natural_query(all_plain_terms, query, opts)
-        plain_terms = all_plain_terms if use_natural else None
+        if (
+            _looks_like_code_query(query)
+            and opts.query_mode != "structured"
+            and opts.natural_query is not False
+        ):
+            # 代码片段不是 Query DSL：里面的引号、冒号和括号都是语法本身。
+            # 直接按索引侧 tokenizer 提取词项，走自然语言 OR 路径。
+            plain_terms = _query_terms(query)
+        else:
+            use_natural = _should_use_natural_query(all_plain_terms, query, opts)
+            plain_terms = all_plain_terms if use_natural else None
 
         # 2. 纯词项自然语言查询：用与索引侧一致的分词器重写为带 IDF 权重的 OR 查询；
         #    结构化语法（字段/布尔/短语/括号/排序）继续走 AST 编译路径。
@@ -139,7 +148,10 @@ class SearchEngine:
             except Exception:
                 pass
 
-        results = self._to_hits(searcher, hits, query)
+        if opts.include_spans:
+            results = self._to_hits(searcher, hits, query)
+        else:
+            results = self._to_bare_hits(searcher, hits)
         elapsed_ms = int((datetime.now() - start).total_seconds() * 1000)
         return SearchResult(
             query=query,
@@ -202,6 +214,42 @@ class SearchEngine:
                 if h is not None:
                     hits.append(h)
             return hits
+
+    def _to_bare_hits(self, searcher, search_result) -> list[SearchHit]:
+        """rank-only 模式：只读 stored 元数据，不触碰正文与 evidence span。
+
+        排序结果与 :meth:`_to_hits` 使用同一个 ``search_result``，因此顺序、
+        score 与 total_matches 完全一致；区别仅在于不执行 ``_read_disk_file``
+        和 ``extract_evidence_spans``。路径字段是 stored 元数据，不依赖正文。
+        """
+        hits: list[SearchHit] = []
+        for score, address in list(search_result.hits):
+            doc = searcher.doc(address)
+            try:
+                path = doc.get_first("path")
+            except (AttributeError, TypeError):
+                continue
+            if path is None:
+                continue
+            path_str = str(path)
+            try:
+                score_val = float(score)
+            except (TypeError, ValueError):
+                score_val = 0.0
+            hits.append(
+                SearchHit(
+                    path=path_str,
+                    filename=Path(path_str).name,
+                    extension=doc.get_first("extension") or "",
+                    doc_type=doc.get_first("doc_type") or "",
+                    size=doc.get_first("size") or 0,
+                    mtime=_parse_mtime(doc.get_first("mtime")),
+                    score=score_val,
+                    snippets=[],
+                    spans=[],
+                )
+            )
+        return hits
 
     def _fallback_snippets(self, content: str, query: str) -> list[str]:
         """后备摘要提取（当波函数未能提取有效证据跨度时兜底）。"""
@@ -309,6 +357,30 @@ _CJK_QUERY_RE = re.compile(r"[\u4e00-\u9fff]")
 _AUTO_STRUCTURED_MAX_CONTENT_TERMS = 3
 _NATURAL_CONNECTIVES = frozenset({"and", "or", "not"})
 _SENTENCE_END_RE = re.compile(r"[.!?。！？]\s*$")
+# 代码查询启发式：CSN / CoIR 的 query 是完整函数或类片段，整段通常包含
+# 换行；单行片段则要求出现强代码声明形态，避免把 “type hinting ...” 或
+# “using h5py ...” 这类自然语言误判成代码。命中后忽略 Query DSL 语法，
+# 避免 Python 字符串引号、dict `name:`、类型标注等被误判为字段表达式。
+_CODE_QUERY_HEAD_RE = re.compile(
+    r"(?m)^\s*(?:"
+    r"async\s+def\s+[A-Za-z_]\w*\s*\(|"
+    r"def\s+[A-Za-z_]\w*\s*\(|"
+    r"class\s+[A-Za-z_]\w*\s*[:(]|"
+    r"(?:function|func|fn)\s+[A-Za-z_]\w*\s*\(|"
+    r"(?:pub\s+)?(?:async\s+)?fn\s+[A-Za-z_]\w*\s*\(|"
+    r"(?:public|private|protected)\s+[^{;\n]*\w\s*\("
+    r")"
+)
+
+
+def _looks_like_code_query(query: str) -> bool:
+    """判断 query 是否更像代码片段而不是 Query DSL。"""
+    stripped = query.strip()
+    if not stripped:
+        return False
+    if "\n" in stripped:
+        return True
+    return bool(_CODE_QUERY_HEAD_RE.search(stripped))
 
 
 def _should_use_natural_query(
