@@ -26,3 +26,6 @@ index_data/
 # OS
 .DS_Store
 Thumbs.db
+
+# benchmark 运行日志（dsh-bounded 输出）
+bench/logs/

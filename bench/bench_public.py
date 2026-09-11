@@ -38,11 +38,21 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Sequence
 
-from lse import __version__ as LSE_VERSION
-from lse.config import DEFAULT_SEARCH_FIELDS
-from lse.indexer import IndexEngine
-from lse.options import SearchOptions
-from lse.searcher import SearchEngine
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from bench.parallel import (  # noqa: E402
+    DATASET_PLACEHOLDER,
+    resolve_jobs,
+    run_parallel,
+    split_datasets,
+)
+from lse import __version__ as LSE_VERSION  # noqa: E402
+from lse.config import DEFAULT_SEARCH_FIELDS  # noqa: E402
+from lse.indexer import IndexEngine  # noqa: E402
+from lse.options import DEFAULT_AUTO_STRUCTURED_MAX_TERMS, SearchOptions  # noqa: E402
+from lse.searcher import SearchEngine  # noqa: E402
 
 BEIR_URL = "https://public.ukp.informatik.tu-darmstadt.de/thakur/BEIR/datasets/{dataset}.zip"
 BEIR_DATASETS = {"scifact", "nfcorpus", "fiqa", "arguana", "trec-covid", "climate-fever"}
@@ -492,6 +502,12 @@ def build_retriever(
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Public retrieval benchmark for lse")
     parser.add_argument("--dataset", default="scifact", help="BEIR dataset name or CoIR name (e.g. cosqa, codesearchnet-python)")
+    parser.add_argument(
+        "--jobs",
+        type=int,
+        default=0,
+        help="数据集级并行度；0=自动（min(数据集数, 4)）。--dataset 支持 a,b,c 逗号列表，需配合含 {dataset} 的 --output-json",
+    )
     parser.add_argument("--cache-dir", type=Path, default=DEFAULT_CACHE)
     parser.add_argument("--baselines", default="lse,tantivy,ripgrep")
     parser.add_argument("--top-k", type=int, default=100)
@@ -552,6 +568,12 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         default="auto",
         help="auto: 短关键词 AND / 长句加权 OR；natural: 强制自然 OR；structured: 旧 AST + 默认 AND。",
     )
+    lse_group.add_argument(
+        "--lse-auto-max-terms",
+        type=int,
+        default=DEFAULT_AUTO_STRUCTURED_MAX_TERMS,
+        help="auto 模式下走结构化 AND 的内容词元上限；0 表示纯词项查询一律走自然 OR（当前默认）",
+    )
     lse_group.add_argument("--lse-idf-power", type=float, default=0.25, help="自然查询词项 IDF 权重指数（默认 0.25）")
     lse_group.add_argument("--lse-no-idf", action="store_true", help="关闭自然查询中的 IDF 词项加权")
     lse_group.add_argument(
@@ -580,6 +602,7 @@ def search_options_from_args(args: argparse.Namespace) -> SearchOptions:
     return SearchOptions(
         query_mode=args.lse_query_mode,
         idf_power=None if args.lse_no_idf else args.lse_idf_power,
+        auto_structured_max_terms=args.lse_auto_max_terms,
         concept_expansion=args.lse_concept_expansion,
         query_fields=fields or DEFAULT_SEARCH_FIELDS,
         conjunction_by_default=args.lse_conjunction == "and",
@@ -589,6 +612,18 @@ def search_options_from_args(args: argparse.Namespace) -> SearchOptions:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
+    raw_argv = list(argv) if argv is not None else sys.argv[1:]
+    datasets = split_datasets(args.dataset)
+    if len(datasets) > 1:
+        if args.output_json is not None and DATASET_PLACEHOLDER not in str(args.output_json):
+            print(
+                f"multi-dataset mode requires --output-json containing {DATASET_PLACEHOLDER}",
+                file=sys.stderr,
+            )
+            return 2
+        print(f"datasets={','.join(datasets)} jobs={resolve_jobs(args.jobs, datasets)}")
+        return run_parallel(Path(__file__), raw_argv, datasets, args.jobs)
+
     lse_options = search_options_from_args(args)
     repeat = max(args.repeat, 1)
     try:
@@ -705,6 +740,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "lse_options": {
             "query_mode": lse_options.query_mode,
             "natural_query": lse_options.natural_query,
+            "auto_structured_max_terms": lse_options.auto_structured_max_terms,
             "idf_power": lse_options.idf_power,
             "concept_expansion": lse_options.concept_expansion,
             "query_fields": list(lse_options.query_fields),
