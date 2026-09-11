@@ -26,12 +26,26 @@ def test_plain_terms_classification() -> None:
     plain = QueryCompiler("heart disease and stroke (adults)")
     assert plain.plain_terms() == ["heart", "disease", "and", "stroke", "adults"]
 
-    # 大写操作符 / 字段 / 短语 / 排序 / 通配符仍为结构化查询
+    # 大写操作符 / 已知字段 / 整句短语 / 排序 / 通配符仍为结构化查询
     assert QueryCompiler("error AND timeout").plain_terms() is None
     assert QueryCompiler('"distributed system"').plain_terms() is None
     assert QueryCompiler("ext:md error").plain_terms() is None
     assert QueryCompiler("sort:size:desc").plain_terms() is None
     assert QueryCompiler("error *").plain_terms() is None
+
+    # 句中标点（未知冒号、引用短语）按自然语言标点处理，避免 BEIR claim
+    # 被误判为字段表达式而退回 AND 结构化路径
+    claim_terms = QueryCompiler(
+        'Mouse models can be generated using "artificial spermatids."'
+    ).plain_terms()
+    assert claim_terms is not None
+    assert "Mouse" in claim_terms
+
+    colon_terms = QueryCompiler(
+        "Full-time work + running small side business: Best business structure for taxes?"
+    ).plain_terms()
+    assert colon_terms is not None
+    assert "business" in colon_terms
 
 
 def test_natural_query_switch_or_and(tmp_path: Path) -> None:
@@ -182,3 +196,23 @@ def test_code_query_with_quotes_and_colons_uses_natural_terms(tmp_path: Path) ->
 
     assert result.total_matches >= 1
     assert Path(result.hits[0].path).name == "code.py"
+
+
+def test_incidental_colon_in_long_claim_uses_natural_query(tmp_path: Path) -> None:
+    index_dir = _build_index(
+        tmp_path,
+        {
+            "claim.txt": "clean water environment farming river pollution",
+            "other.txt": "totally unrelated prose text",
+        },
+    )
+    engine = SearchEngine(index_dir)
+    query = (
+        "Clean water matters for the environment: "
+        "modern farming causes river pollution and ecosystem damage"
+    )
+
+    result = engine.search(query, options=SearchOptions(include_spans=False))
+
+    assert result.total_matches == 1
+    assert Path(result.hits[0].path).name == "claim.txt"

@@ -176,19 +176,21 @@ class QueryCompiler:
     def plain_terms(self) -> list[str] | None:
         """若查询是纯词项自然语言查询则返回词项列表，否则返回 ``None``。
 
-        与结构化语法不同，自然语言中的 ``and`` / ``or`` / ``not`` 及括号
-        属于普通标点或停用词，不应触发 AND 语义（SciFact 等第三方语料中
-        大量 claim 含这些词）。因此这里仅把下列内容视为结构化语法：
+        与结构化语法不同，自然语言中的 ``and`` / ``or`` / ``not``、括号
+        以及句中标点（例如 ``business: Best ...``、半句引号）属于普通
+        标点或停用词，不应触发 AND 或字段表达式。这里仅把真正有明确 DSL
+        语义的内容视为结构化：
 
-        - 字段表达式 ``field:value``、``sort:...``
-        - 引号短语、通配符 ``*``
+        - 已知字段表达式 ``field:value``、``sort:...``
+        - 整句就是一个精确引号短语、通配符 ``*``
         - 大写的显式布尔操作符 ``AND`` / ``OR`` / ``NOT``
 
-        小写连接词与普通括号会被忽略，交由 ``tokenize_stream`` 与 BM25
-        统一处理。
+        未知 ``prefix:value`` 与出现在长句中的引号按自然语言标点处理，
+        交由 ``tokenize_stream`` 与 BM25 统一处理。
         """
+        tokens = self.tokenize()
         terms: list[str] = []
-        for tok in self.tokenize():
+        for tok in tokens:
             if tok.type == TokenType.TERM:
                 if tok.value.strip() == "*":
                     return None
@@ -199,6 +201,16 @@ class QueryCompiler:
                 terms.append(tok.value)
             elif tok.type in (TokenType.LPAREN, TokenType.RPAREN):
                 continue
+            elif tok.type == TokenType.PHRASE:
+                # 整句精确短语仍走结构化；长句中的引号只是自然语言标点。
+                if len(tokens) == 1:
+                    return None
+                terms.append(tok.value)
+            elif tok.type == TokenType.FIELD_EXPR:
+                prefix = tok.value.split(":", 1)[0].lower()
+                if prefix in FIELD_ALIASES or prefix == "sort":
+                    return None
+                terms.append(tok.value)
             else:
                 return None
         return terms
